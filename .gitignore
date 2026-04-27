@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/*.db
+uploads/*.png
+uploads/*.jpg
+uploads/*.jpeg
+.env
