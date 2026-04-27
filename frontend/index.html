@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Analysis Hub</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+    <!-- Nav -->
+    <nav class="nav">
+        <h1>Stock Analysis Hub</h1>
+        <div class="spacer"></div>
+        <input type="date" id="datePicker">
+        <div class="tabs">
+            <button class="btn btn-outline active" data-view="daily">日报</button>
+            <button class="btn btn-outline" data-view="weekly">周报</button>
+            <button class="btn btn-outline" data-view="monthly">月报</button>
+        </div>
+        <button class="btn btn-primary" id="uploadBtn">上传图片</button>
+    </nav>
+
+    <div class="content">
+        <!-- Upload Area (hidden by default) -->
+        <div class="upload-area" id="uploadArea" style="display:none">
+            <p>点击或拖拽图片到此处上传</p>
+            <p style="color:var(--text-muted);font-size:13px;margin-top:8px">支持 PNG、JPG 格式的股票热榜截图</p>
+            <input type="file" id="fileInput" accept="image/*">
+        </div>
+
+        <!-- Main content -->
+        <div id="mainContent">
+            <div class="empty-state" id="emptyState">
+                <h2>暂无数据</h2>
+                <p>点击右上角"上传图片"开始录入股票热榜数据</p>
+            </div>
+
+            <!-- Daily View -->
+            <div id="dailyView" style="display:none">
+                <div class="section-title">热榜 Top 10</div>
+                <div class="cards-grid" id="cardsGrid"></div>
+                <div class="charts-row">
+                    <div class="chart-box">
+                        <h3>涨跌幅排行</h3>
+                        <div class="chart-container" id="changeChart"></div>
+                    </div>
+                    <div class="chart-box">
+                        <h3>持仓人数变化</h3>
+                        <div class="chart-container" id="holdersChart"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Weekly View -->
+            <div id="weeklyView" style="display:none">
+                <div class="charts-row">
+                    <div class="chart-box">
+                        <h3>板块热度 Top 10</h3>
+                        <div class="chart-container" id="sectorChart"></div>
+                    </div>
+                    <div class="chart-box">
+                        <h3>个股上榜频次</h3>
+                        <div class="chart-container" id="frequencyChart"></div>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <h3>热度趋势</h3>
+                    <div class="chart-container" id="trendChart" style="height:400px"></div>
+                </div>
+            </div>
+
+            <!-- Monthly View -->
+            <div id="monthlyView" style="display:none">
+                <div class="charts-row">
+                    <div class="chart-box">
+                        <h3>月度板块轮动</h3>
+                        <div class="chart-container" id="rotationChart"></div>
+                    </div>
+                    <div class="chart-box">
+                        <h3>持仓长线趋势</h3>
+                        <div class="chart-container" id="monthlyHoldersChart"></div>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <h3>月度综合热力图</h3>
+                    <div class="chart-container" id="monthlyHeatChart" style="height:400px"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div class="modal-overlay" id="confirmModal">
+        <div class="modal">
+            <h2>确认识别结果</h2>
+            <p style="color:var(--text-muted);margin-bottom:16px">请检查以下数据是否正确，可点击单元格编辑</p>
+            <table class="edit-table">
+                <thead>
+                    <tr>
+                        <th>#</th><th>股票名称</th><th>代码</th><th>热度(万)</th>
+                        <th>涨跌%</th><th>成交(亿)</th><th>今持仓</th><th>昨持仓</th>
+                    </tr>
+                </thead>
+                <tbody id="editTableBody"></tbody>
+            </table>
+            <div class="actions">
+                <button class="btn btn-outline" id="cancelBtn">取消</button>
+                <button class="btn btn-primary" id="confirmBtn">确认保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
