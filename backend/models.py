@@ -3,7 +3,7 @@ from typing import Optional
 
 
 class StockRecord(BaseModel):
-    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    date: str = Field(default="", pattern=r"^\d{4}-\d{2}-\d{2}$")
     rank: int = Field(..., ge=1, le=10)
     stock_name: str
     stock_code: str = Field(..., pattern=r"^\d{6}$")
