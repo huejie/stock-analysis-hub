@@ -5,3 +5,6 @@ uploads/*.png
 uploads/*.jpg
 uploads/*.jpeg
 .env
+data/ocr_debug.txt
+data/ocr_debug_latest.txt
+.claude/

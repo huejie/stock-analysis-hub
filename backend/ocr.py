@@ -50,36 +50,72 @@ def ocr_image(image_path: str) -> str:
 def parse_ocr_text(text: str, record_date: str) -> list[dict]:
     """将 OCR 文本解析为结构化股票记录列表。
 
-    百度 OCR 返回的实际格式（每只股票 5-6 行）：
+    核心思路：用"中文名+热度值(w)"作为锚点定位每只股票，
+    不依赖排名数字（OCR 经常漏识别排名）。
+
+    OCR 实际格式示例：
         1
         圣阳股份1358.33w
         002580场内情绪高标-液冷储能-上午震荡回
         42人持仓>
         调-下午大幅冲高回落-收盘上涨4%-成交44亿
         昨日：35
+
+    或排名被 OCR 漏掉：
+        深圳华强373.22w
+        000062华为昇腾-芯片分销龙头-今日二连板-
+        44人持仓>
+        上演4天3板-盘中炸板回封-成交39亿
+        昨日：11
     """
     if not text.strip():
         return []
 
     lines = text.strip().split('\n')
+
+    # 股票名称 + 热度值的正则（锚点模式）
+    stock_heat_re = re.compile(r'([\u4e00-\u9fa5]{2,6})([\d.]+)w')
+
+    # 找到所有包含"股票名+热度"的行（锚点行）
+    anchor_indices = []
+    for i, line in enumerate(lines):
+        if stock_heat_re.search(line.strip()):
+            anchor_indices.append(i)
+
+    if not anchor_indices:
+        return []
+
+    # 确定每个锚点的 block 起始行（可能包含前一行的排名数字）
+    block_starts = []
+    for anchor in anchor_indices:
+        bs = anchor
+        if anchor > 0:
+            prev = lines[anchor - 1].strip()
+            if re.match(r'^(10|[1-9])$', prev):
+                bs = anchor - 1
+        block_starts.append(bs)
+
     records = []
-    i = 0
+    for idx, anchor in enumerate(anchor_indices):
+        block_start = block_starts[idx]
+        block_end = block_starts[idx + 1] if idx + 1 < len(anchor_indices) else len(lines)
 
-    while i < len(lines):
-        line = lines[i].strip()
+        block_lines = [lines[j].strip() for j in range(block_start, block_end)]
+        full_text = '\n'.join(block_lines)
+        anchor_line = lines[anchor].strip()
 
-        # 匹配排名行（纯数字 1-10，可能紧跟名称如 "7天银机电"）
-        rank_match = re.match(r'^(10|[1-9])(?:\s|$)', line)
-        if not rank_match:
-            # 也可能是 "7天银机电917.15w" 这种排名和名称在一行
-            rank_match = re.match(r'^(10|[1-9])([\u4e00-\u9fa5].*)', line)
-
-        if not rank_match:
-            i += 1
-            continue
-
-        rank = int(rank_match.group(1))
-        rest_of_line = rank_match.group(2).strip() if rank_match.lastindex >= 2 else ""
+        # 确定排名
+        rank = idx + 1  # 默认按锚点出现顺序
+        # 锚点行内嵌排名（如 "8东山精密871.87w"）
+        rank_m = re.match(r'^(10|[1-9])([\u4e00-\u9fa5])', anchor_line)
+        if rank_m:
+            rank = int(rank_m.group(1))
+        else:
+            # block 首行是独立排名数字
+            first = block_lines[0].strip()
+            rank_m = re.match(r'^(10|[1-9])$', first)
+            if rank_m:
+                rank = int(rank_m.group(1))
 
         record = {
             "date": record_date,
@@ -95,30 +131,13 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
             "price_action": "",
         }
 
-        # 收集该股票的所有文本行（直到下一个排名出现）
-        block_lines = []
-        if rest_of_line:
-            block_lines.append(rest_of_line)
-        i += 1
-
-        while i < len(lines):
-            next_line = lines[i].strip()
-            # 检查是否是下一个排名
-            if re.match(r'^(10|[1-9])(?:\s|$)', next_line) or re.match(r'^(10|[1-9])([\u4e00-\u9fa5])', next_line):
-                break
-            block_lines.append(next_line)
-            i += 1
-
-        # 合并所有行用于全文匹配
-        full_text = '\n'.join(block_lines)
-
-        # 股票名称 + 热度值（名称和数字之间可能无空格）
-        heat_match = re.search(r'([\u4e00-\u9fa5]{2,6})([\d.]+)w', full_text)
+        # 股票名称 + 热度值
+        heat_match = stock_heat_re.search(full_text)
         if heat_match:
             record["stock_name"] = heat_match.group(1)
             record["heat_value"] = float(heat_match.group(2))
 
-        # 股票代码（6位数字，在行首出现）
+        # 股票代码（6位数字）
         code_match = re.search(r'(?<!\d)(\d{6})(?!\d)', full_text)
         if code_match:
             record["stock_code"] = code_match.group(1)
@@ -151,7 +170,6 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
             if '爆量' in full_text:
                 for j, bl in enumerate(block_lines):
                     if '爆量' in bl:
-                        # 检查之后的所有行找 "XX亿"
                         for k in range(j + 1, len(block_lines)):
                             num_match = re.match(r'([\d.]+)亿', block_lines[k].strip())
                             if num_match:
@@ -177,6 +195,8 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
         # 走势描述：提取代码后面的描述部分，合并多行
         desc_parts = []
         for bl in block_lines:
+            if stock_heat_re.search(bl):
+                continue  # 跳过股票名称+热度行
             desc_match = re.match(r'\d{6}(.*)', bl)
             if desc_match:
                 desc_parts.append(desc_match.group(1).strip())
@@ -195,6 +215,12 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
 async def analyze_image(image_path: str) -> dict:
     """完整的图片识别流程：OCR → 解析。"""
     text = ocr_image(image_path)
+
+    # 保存原始 OCR 文本用于调试
+    debug_path = Path("data/ocr_debug_latest.txt")
+    debug_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_path.write_text(text, encoding="utf-8")
+
     today = date.today().isoformat()
     records = parse_ocr_text(text, today)
-    return {"date": today, "records": records}
+    return {"date": today, "records": records, "raw_text": text}
