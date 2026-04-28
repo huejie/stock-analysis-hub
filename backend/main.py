@@ -102,8 +102,13 @@ async def daily_stats(date: str):
         if row.get("sector_tags"):
             row["sector_tags"] = json.loads(row["sector_tags"])
 
-    prev_date_obj = datetime.strptime(date, "%Y-%m-%d") - timedelta(days=1)
-    prev_date = prev_date_obj.strftime("%Y-%m-%d")
+    # 从已有数据中找上一个交易日（自动跳过周末和假期）
+    all_dates = db.get_all_dates()  # DESC order
+    prev_date = ""
+    for d in all_dates:
+        if d < date:
+            prev_date = d
+            break
     prev_rows = db.query_by_date(prev_date)
     for row in prev_rows:
         if row.get("sector_tags"):

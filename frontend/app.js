@@ -115,16 +115,19 @@ $$('.tabs .btn').forEach(btn => {
 datePicker.addEventListener('change', loadView);
 
 $('#prevDateBtn').addEventListener('click', () => {
-    const d = new Date(datePicker.value);
-    d.setDate(d.getDate() - 1);
-    datePicker.value = d.toISOString().slice(0, 10);
-    loadView();
+    // 跳到上一个有数据的交易日
+    const idx = availableDates.indexOf(datePicker.value);
+    if (idx >= 0 && idx < availableDates.length - 1) {
+        datePicker.value = availableDates[idx + 1]; // dates are DESC
+        loadView();
+    }
 });
 $('#nextDateBtn').addEventListener('click', () => {
-    const d = new Date(datePicker.value);
-    d.setDate(d.getDate() + 1);
-    datePicker.value = d.toISOString().slice(0, 10);
-    loadView();
+    const idx = availableDates.indexOf(datePicker.value);
+    if (idx > 0) {
+        datePicker.value = availableDates[idx - 1]; // dates are DESC
+        loadView();
+    }
 });
 dateHistory.addEventListener('change', () => {
     if (dateHistory.value) {
