@@ -63,6 +63,7 @@ export function buildPnlChartOption(rows: SeasonDailyStat[]): EChartsOption {
         lineStyle: { width: 2, color: '#94a3b8' },
         itemStyle: { color: (p: unknown) => ((p as { value: number }).value >= 0 ? '#ef4444' : '#10b981') },
         symbolSize: 5, symbol: 'circle',
+        emphasis: { focus: 'series', lineStyle: { width: 4 }, itemStyle: { borderWidth: 2, borderColor: '#fff' } },
         markLine: {
           silent: true, data: [{ yAxis: 0 }],
           lineStyle: { color: '#475569', type: 'solid', width: 1 },
@@ -75,6 +76,7 @@ export function buildPnlChartOption(rows: SeasonDailyStat[]): EChartsOption {
         lineStyle: { width: 2.5, color: CHART_COLORS.cyan },
         itemStyle: { color: CHART_COLORS.cyan },
         symbolSize: 5, symbol: 'circle',
+        emphasis: { focus: 'series', lineStyle: { width: 4 }, itemStyle: { borderWidth: 2, borderColor: '#fff' } },
         areaStyle: {
           opacity: 0.08,
           color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,

@@ -47,6 +47,15 @@ def ocr_image(image_path: str) -> str:
     return "\n".join(words)
 
 
+def _is_limit_up(text: str, stock_code: str = "") -> bool:
+    """判断文本描述是否为涨停。匹配：涨停、封板、X连板、X天Y板、炸板回封、回封等。"""
+    patterns = [
+        r'涨停', r'封板', r'连板', r'\d+天\d+板', r'回封',
+        r'炸板回封', r'首板', r'二连板', r'三板', r'四板', r'五板',
+    ]
+    return any(re.search(p, text) for p in patterns)
+
+
 def parse_ocr_text(text: str, record_date: str) -> list[dict]:
     """将 OCR 文本解析为结构化股票记录列表。
 
@@ -152,16 +161,23 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
             pct_match = re.search(r'下跌([\d.]+)%', full_text)
             if pct_match:
                 record["price_change_pct"] = -float(pct_match.group(1))
+            elif '跌停' in full_text:
+                record["price_change_pct"] = -10.0
             elif '大跌' in full_text:
-                match = re.search(r'大跌([\d.]+)%', full_text)
+                match = re.search(r'大涨([\d.]+)%', full_text)
                 record["price_change_pct"] = -float(match.group(1)) if match else -0.1
             elif '微跌' in full_text:
                 record["price_change_pct"] = -0.1
+            elif _is_limit_up(full_text, record.get("stock_code", "")):
+                code = record.get("stock_code", "")
+                # 创业板(300/301)和科创板(688)涨跌幅20%，其余10%
+                if code and code[:3] in ("300", "301", "688"):
+                    record["price_change_pct"] = 20.0
+                else:
+                    record["price_change_pct"] = 10.0
             elif '大涨' in full_text:
                 match = re.search(r'大涨([\d.]+)%', full_text)
                 record["price_change_pct"] = float(match.group(1)) if match else 0.1
-            elif '跌停' in full_text:
-                record["price_change_pct"] = -10.0
 
         # 成交额
         vol_match = re.search(r'(?:成交|爆量)([\d.]+)亿', full_text)

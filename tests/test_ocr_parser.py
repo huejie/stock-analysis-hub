@@ -41,6 +41,7 @@ def test_parse_full_text():
     assert r2["stock_name"] == "深圳华强"
     assert r2["stock_code"] == "000062"
     assert r2["heat_value"] == 357.73
+    assert r2["price_change_pct"] == 10.0  # 二连板+炸板回封 = 涨停
     assert r2["turnover_amount"] == 39.0
 
     r3 = result[2]
@@ -130,3 +131,27 @@ def test_parse_limit_down():
     assert len(result) == 1
     assert result[0]["stock_name"] == "苏州高新"
     assert result[0]["price_change_pct"] == -10.0
+
+
+def test_parse_limit_up_keywords():
+    """测试各种涨停描述：封板、涨停、X连板、X天Y板、回封。"""
+    cases = [
+        ("600736", "封板", 10.0),
+        ("600736", "涨停", 10.0),
+        ("000062", "今日首板", 10.0),
+        ("000062", "今日三连板", 10.0),
+        ("300136", "上演5天3板", 20.0),  # 创业板 20%
+        ("688256", "炸板回封", 20.0),   # 科创板 20%
+        ("002580", "尾盘回封", 10.0),   # 主板 10%
+    ]
+    for code, keyword, expected in cases:
+        mock_text = f"""1
+测试股票500.00w
+{code}描述文字-{keyword}-成交10亿
+30人持仓>
+昨日：20"""
+        result = parse_ocr_text(mock_text, "2026-04-27")
+        assert len(result) == 1, f"Failed for '{keyword}' with code {code}"
+        assert result[0]["price_change_pct"] == expected, (
+            f"'{keyword}' with code {code}: expected {expected}, got {result[0]['price_change_pct']}"
+        )

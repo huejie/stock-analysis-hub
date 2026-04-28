@@ -8,7 +8,6 @@ import {
   buildFrequencyChartOption,
   buildTrendChartOption,
   buildHoldersTrendChartOption,
-  buildHeatMapChartOption,
 } from '../charts/range'
 import ChartBox from '../components/ChartBox.vue'
 import TimeFilter from '../components/TimeFilter.vue'
@@ -26,7 +25,6 @@ const sectorRef = ref()
 const frequencyRef = ref()
 const trendRef = ref()
 const holdersTrendRef = ref()
-const heatMapRef = ref()
 
 const presets = [
   { label: '近7天', days: 7 },
@@ -63,7 +61,6 @@ async function load() {
     frequencyRef.value?.setOption(buildFrequencyChartOption(res))
     trendRef.value?.setOption(buildTrendChartOption(res))
     holdersTrendRef.value?.setOption(buildHoldersTrendChartOption(res))
-    heatMapRef.value?.setOption(buildHeatMapChartOption(res))
   } catch {
     records.value = []
   }
@@ -91,11 +88,8 @@ load()
         <ChartBox ref="sectorRef" title="板块热度 Top 10" />
         <ChartBox ref="frequencyRef" title="个股上榜频次" />
       </div>
-      <ChartBox ref="trendRef" title="热度趋势" height="400px" />
-      <div class="charts-row">
-        <ChartBox ref="holdersTrendRef" title="持仓变化趋势" />
-        <ChartBox ref="heatMapRef" title="综合热力图" />
-      </div>
+      <ChartBox ref="trendRef" title="热度趋势" height="380px" />
+      <ChartBox ref="holdersTrendRef" title="持仓变化趋势" height="340px" />
     </template>
   </div>
 </template>
