@@ -11,24 +11,32 @@
     <!-- Nav -->
     <nav class="nav">
         <div class="nav-brand">
-            <span class="logo">📊</span>
-            <h1>股票热榜分析</h1>
+            <div class="logo">S</div>
+            <h1>StockPulse</h1>
         </div>
         <div class="nav-controls">
             <div class="date-group">
-                <button class="btn btn-icon" id="prevDateBtn" title="前一天">◀</button>
+                <button class="btn-icon" id="prevDateBtn" title="前一天">&#9664;</button>
                 <input type="date" id="datePicker">
-                <button class="btn btn-icon" id="nextDateBtn" title="后一天">▶</button>
+                <button class="btn-icon" id="nextDateBtn" title="后一天">&#9654;</button>
                 <select id="dateHistory" class="date-history">
-                    <option value="">历史日期</option>
+                    <option value="">历史记录</option>
                 </select>
             </div>
             <div class="tabs">
                 <button class="btn btn-outline active" data-view="daily">日报</button>
-                <button class="btn btn-outline" data-view="weekly">周报</button>
-                <button class="btn btn-outline" data-view="monthly">月报</button>
+                <button class="btn btn-outline" data-view="range" data-range="7">周报</button>
+                <button class="btn btn-outline" data-view="range" data-range="30">月报</button>
+                <button class="btn btn-outline" data-view="range" data-range="90">近三月</button>
+                <button class="btn btn-outline" data-view="range" data-range="custom">自定义</button>
             </div>
-            <button class="btn btn-primary" id="uploadBtn">📷 上传图片</button>
+            <div class="range-group" id="rangeGroup" style="display:none">
+                <input type="date" id="rangeStart">
+                <span class="range-sep">至</span>
+                <input type="date" id="rangeEnd">
+                <button class="btn btn-primary btn-sm" id="rangeQueryBtn">查询</button>
+            </div>
+            <button class="btn btn-primary" id="uploadBtn">上传图片</button>
         </div>
     </nav>
 
@@ -38,7 +46,7 @@
     <div class="content">
         <!-- Upload Area (hidden by default) -->
         <div class="upload-area" id="uploadArea" style="display:none">
-            <div class="upload-icon">📷</div>
+            <div class="upload-icon">+</div>
             <p class="upload-title">点击或拖拽图片到此处上传</p>
             <p class="upload-hint">支持 PNG、JPG 格式的股票热榜截图</p>
             <input type="file" id="fileInput" accept="image/*">
@@ -47,7 +55,7 @@
         <!-- Main content -->
         <div id="mainContent">
             <div class="empty-state" id="emptyState">
-                <div class="empty-icon">📈</div>
+                <div class="empty-icon">S</div>
                 <h2>暂无数据</h2>
                 <p>点击右上角「上传图片」开始录入股票热榜数据</p>
             </div>
@@ -55,10 +63,14 @@
             <!-- Daily View -->
             <div id="dailyView" style="display:none">
                 <div class="section-title">
-                    <span class="section-icon">🔥</span> 热榜 Top 10
+                    <span class="section-icon">&#9670;</span> 热榜 Top 10
                     <span class="section-date" id="dailyDate"></span>
                 </div>
                 <div class="cards-grid" id="cardsGrid"></div>
+                <div class="section-title removed-title" id="removedTitle" style="display:none">
+                    <span class="section-icon">&#9671;</span> 移出热榜
+                </div>
+                <div class="cards-grid cards-removed" id="removedGrid"></div>
                 <div class="charts-row">
                     <div class="chart-box">
                         <h3>涨跌幅排行</h3>
@@ -71,8 +83,12 @@
                 </div>
             </div>
 
-            <!-- Weekly View -->
-            <div id="weeklyView" style="display:none">
+            <!-- Range View (replaces weekly + monthly) -->
+            <div id="rangeView" style="display:none">
+                <div class="section-title">
+                    <span class="section-icon">&#9670;</span> 时段分析
+                    <span class="section-date" id="rangeDateLabel"></span>
+                </div>
                 <div class="charts-row">
                     <div class="chart-box">
                         <h3>板块热度 Top 10</h3>
@@ -87,23 +103,15 @@
                     <h3>热度趋势</h3>
                     <div class="chart-container" id="trendChart" style="height:400px"></div>
                 </div>
-            </div>
-
-            <!-- Monthly View -->
-            <div id="monthlyView" style="display:none">
                 <div class="charts-row">
                     <div class="chart-box">
-                        <h3>月度板块轮动</h3>
-                        <div class="chart-container" id="rotationChart"></div>
+                        <h3>持仓变化趋势</h3>
+                        <div class="chart-container" id="holdersTrendChart"></div>
                     </div>
                     <div class="chart-box">
-                        <h3>持仓长线趋势</h3>
-                        <div class="chart-container" id="monthlyHoldersChart"></div>
+                        <h3>综合热力图</h3>
+                        <div class="chart-container" id="heatMapChart"></div>
                     </div>
-                </div>
-                <div class="chart-box">
-                    <h3>月度综合热力图</h3>
-                    <div class="chart-container" id="monthlyHeatChart" style="height:400px"></div>
                 </div>
             </div>
         </div>
@@ -115,6 +123,11 @@
             <div class="modal-header">
                 <h2>确认识别结果</h2>
                 <span class="modal-count" id="modalCount"></span>
+            </div>
+            <div class="modal-date-row">
+                <label>数据日期</label>
+                <input type="date" id="modalDatePicker">
+                <span class="modal-date-hint" id="dateDetectHint"></span>
             </div>
             <p class="modal-hint">请检查以下数据是否正确，可点击单元格编辑</p>
             <div class="table-wrap">
@@ -130,7 +143,7 @@
             </div>
             <div class="actions">
                 <button class="btn btn-outline" id="cancelBtn">取消</button>
-                <button class="btn btn-primary" id="confirmBtn">✓ 确认保存</button>
+                <button class="btn btn-primary" id="confirmBtn">确认保存</button>
             </div>
         </div>
     </div>

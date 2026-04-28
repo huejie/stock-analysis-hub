@@ -212,6 +212,30 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
     return records
 
 
+def extract_date_from_text(text: str) -> str | None:
+    """从 OCR 文本中提取日期，支持多种格式。"""
+    now = date.today()
+
+    # 2026-04-28 或 2026/04/28
+    m = re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?', text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+    # 04月28日 或 4月28日（用当前年份）
+    m = re.search(r'(\d{1,2})月(\d{1,2})日', text)
+    if m:
+        return f"{now.year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+
+    # 04-28 或 04/28（用当前年份）
+    m = re.search(r'(?<!\d)(\d{1,2})[-/](\d{1,2})(?!\d)', text)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{now.year}-{month:02d}-{day:02d}"
+
+    return None
+
+
 async def analyze_image(image_path: str) -> dict:
     """完整的图片识别流程：OCR → 解析。"""
     text = ocr_image(image_path)
@@ -221,6 +245,6 @@ async def analyze_image(image_path: str) -> dict:
     debug_path.parent.mkdir(parents=True, exist_ok=True)
     debug_path.write_text(text, encoding="utf-8")
 
-    today = date.today().isoformat()
-    records = parse_ocr_text(text, today)
-    return {"date": today, "records": records, "raw_text": text}
+    detected_date = extract_date_from_text(text) or date.today().isoformat()
+    records = parse_ocr_text(text, detected_date)
+    return {"date": detected_date, "records": records, "raw_text": text}

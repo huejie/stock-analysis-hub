@@ -94,16 +94,25 @@ async def get_dates():
 
 @app.get("/api/stats/daily")
 async def daily_stats(date: str):
-    """日报统计数据。"""
+    """日报统计数据，含前一天对比。"""
     rows = db.query_by_date(date)
     if not rows:
         raise HTTPException(404, "该日期无数据")
     for row in rows:
         if row.get("sector_tags"):
             row["sector_tags"] = json.loads(row["sector_tags"])
+
+    prev_date_obj = datetime.strptime(date, "%Y-%m-%d") - timedelta(days=1)
+    prev_date = prev_date_obj.strftime("%Y-%m-%d")
+    prev_rows = db.query_by_date(prev_date)
+    for row in prev_rows:
+        if row.get("sector_tags"):
+            row["sector_tags"] = json.loads(row["sector_tags"])
+
     return {
         "date": date,
         "records": rows,
+        "prev_records": prev_rows,
         "summary": {
             "total_stocks": len(rows),
             "avg_holders_change": sum(
