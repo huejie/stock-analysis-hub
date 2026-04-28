@@ -32,7 +32,18 @@
       "mcp__chrome-devtools__list_pages",
       "Bash(python -c \"import sys,json; rows=json.load\\(sys.stdin\\); print\\(f'count={len\\(rows\\)}, first={rows[0][\\\\\"date\\\\\"] if rows else \\\\\"none\\\\\"}, last={rows[-1][\\\\\"date\\\\\"] if rows else \\\\\"none\\\\\"}'\\)\")",
       "Bash(taskkill //PID 17436 //T //F)",
-      "Bash(.venv/Scripts/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --reload)"
+      "Bash(.venv/Scripts/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --reload)",
+      "Bash(npm install *)",
+      "Bash(npx vue-tsc *)",
+      "Bash(npm run *)",
+      "Bash(npx vite *)",
+      "Bash(python -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --reload)",
+      "Bash(python *)",
+      "Bash(pip list *)",
+      "Bash(/d/my-projects/stock-analysis-hub/.venv/Scripts/python.exe *)",
+      "Bash(.venv/Scripts/python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8889)",
+      "mcp__chrome-devtools__wait_for",
+      "Bash(awk '{print $5}')"
     ]
   }
 }

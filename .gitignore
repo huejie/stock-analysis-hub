@@ -8,3 +8,5 @@ uploads/*.jpeg
 data/ocr_debug.txt
 data/ocr_debug_latest.txt
 .claude/
+frontend/node_modules/
+frontend/dist/

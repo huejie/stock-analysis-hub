@@ -17,10 +17,14 @@ app = FastAPI(title="Stock Analysis Hub")
 
 db = Database()
 
-# 静态文件
-frontend_dir = Path(__file__).parent.parent / "frontend"
-if frontend_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
+# 静态文件 - Vue build output
+frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+frontend_legacy = Path(__file__).parent.parent / "frontend"
+
+if frontend_dist.exists():
+    app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+elif frontend_legacy.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_legacy)), name="static")
 
 
 @app.get("/")
@@ -30,12 +34,16 @@ async def index():
 
 @app.get("/preview")
 async def preview():
-    return FileResponse(str(frontend_dir / "index.html"))
+    if frontend_dist.exists():
+        return FileResponse(str(frontend_dist / "index.html"))
+    return FileResponse(str(frontend_legacy / "index.html"))
 
 
 @app.get("/admin")
 async def admin():
-    return FileResponse(str(frontend_dir / "index.html"))
+    if frontend_dist.exists():
+        return FileResponse(str(frontend_dist / "index.html"))
+    return FileResponse(str(frontend_legacy / "index.html"))
 
 
 @app.post("/api/upload")
