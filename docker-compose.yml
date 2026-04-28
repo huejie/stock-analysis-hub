@@ -1,0 +1,11 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    env_file:
+      - .env
+    restart: unless-stopped
