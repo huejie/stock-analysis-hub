@@ -49,7 +49,7 @@ export function buildPnlChartOption(rows: SeasonDailyStat[]): EChartsOption {
         axisLabel: { color: CHART_COLORS.textMuted, fontSize: 13, formatter: '{value}%' },
       },
       {
-        type: 'value', name: '仓位%',
+        type: 'value', name: '仓位%', min: 60,
         nameTextStyle: { color: CHART_COLORS.textMuted, fontSize: 13 },
         splitLine: { show: false },
         axisLine: { show: false }, axisTick: { show: false },
