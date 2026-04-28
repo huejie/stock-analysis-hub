@@ -8,6 +8,7 @@ __pycache__/
 
 # Database
 data/*.db
+data/backup/
 data/ocr_debug.txt
 data/ocr_debug_latest.txt
 

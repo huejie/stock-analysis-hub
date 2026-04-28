@@ -1,4 +1,7 @@
-"""生成模拟数据用于功能预览。运行: python seed_data.py"""
+"""生成模拟数据用于功能预览。运行: python seed_data.py
+
+⚠️  此脚本会清空并替换 data/stock.db 中的所有数据，仅用于开发环境！
+"""
 import json
 import os
 import random
@@ -10,8 +13,17 @@ random.seed(42)
 DB_PATH = Path(__file__).parent / "data" / "stock.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# 清空已有数据库（不删除文件，避免锁定问题）
+# 安全确认：检查数据库中是否已有真实数据
 conn = sqlite3.connect(str(DB_PATH))
+existing = conn.execute("SELECT COUNT(*) FROM stock_records").fetchone()[0]
+if existing > 0:
+    print(f"[WARNING] 数据库中已有 {existing} 条记录！")
+    print("此脚本会清空所有数据并替换为模拟数据。")
+    confirm = input("确认继续？(yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("[INFO] 已取消。")
+        conn.close()
+        raise SystemExit(0)
 conn.executescript("""
     DELETE FROM stock_records;
     DELETE FROM season_daily_stats;
