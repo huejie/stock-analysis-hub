@@ -104,8 +104,8 @@ load()
 
     <EmptyState v-if="rows.length === 0" />
     <template v-else>
-      <ChartBox ref="pnlChartRef" title="人均盈亏 & 累计走势" height="400px" />
-      <ChartBox ref="positionChartRef" title="人均仓位" height="360px" />
+      <ChartBox ref="pnlChartRef" title="每日盈亏 & 人均仓位" height="400px" />
+      <ChartBox ref="positionChartRef" title="累计盈亏" height="360px" />
     </template>
 
     <!-- PnL Input Modal -->

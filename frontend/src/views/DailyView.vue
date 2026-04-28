@@ -118,16 +118,19 @@ init()
             <div class="card-header">
               <span class="rank">{{ r.rank }}</span>
               <div class="info">
-                <div class="name">{{ r.stock_name }}</div>
-                <div class="code">{{ r.stock_code }}</div>
+                <div class="name-row">
+                  <span class="name">{{ r.stock_name }}</span>
+                  <span class="code">{{ r.stock_code }}</span>
+                </div>
               </div>
-              <div class="heat">{{ r.heat_value }}w</div>
             </div>
-            <div class="change" :class="r.price_change_pct! >= 0 ? 'change-up' : 'change-down'">
-              {{ r.price_change_pct! >= 0 ? '+' : '' }}{{ r.price_change_pct }}%
-            </div>
-            <div class="tags">
-              <span v-for="tag in r.sector_tags" :key="tag" class="tag">{{ tag }}</span>
+            <div class="card-body">
+              <div class="change" :class="r.price_change_pct! >= 0 ? 'change-up' : 'change-down'">
+                {{ r.price_change_pct! >= 0 ? '+' : '' }}{{ r.price_change_pct }}%
+              </div>
+              <div class="tags">
+                <span v-for="tag in r.sector_tags" :key="tag" class="tag">{{ tag }}</span>
+              </div>
             </div>
           </div>
         </div>

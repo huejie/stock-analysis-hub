@@ -221,8 +221,8 @@ body::before {
 /* ===== Cards Grid ===== */
 .cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
     margin-bottom: 28px;
 }
 
@@ -270,9 +270,9 @@ body::before {
 
 .stock-card .card-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
 }
 
 .stock-card .rank {
@@ -356,49 +356,66 @@ body::before {
 .removed-title { margin-top: 12px; opacity: 0.7; }
 .cards-removed { margin-bottom: 20px; }
 
-.stock-card .info { flex: 1; min-width: 0; }
+.stock-card .info { flex: 1; min-width: 0; overflow: hidden; }
+.stock-card .name-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    overflow: hidden;
+}
 .stock-card .name {
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 700;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     letter-spacing: -0.01em;
+    line-height: 1.3;
+    flex-shrink: 1;
+    min-width: 0;
 }
 .stock-card .code {
     color: #c1cedb;
-    font-size: 13px;
+    font-size: 12px;
     font-family: var(--font-mono);
     font-weight: 500;
     letter-spacing: 0.03em;
-}
-.stock-card .heat {
-    color: var(--amber);
-    font-size: 13px;
-    font-weight: 600;
     flex-shrink: 0;
-    font-family: var(--font-mono);
+}
+.stock-card .badges-row {
+    display: flex;
+    gap: 4px;
+    margin-top: 3px;
+    min-height: 16px;
 }
 
+.stock-card .card-body {
+    margin-top: 4px;
+}
 .stock-card .change {
-    font-size: 24px;
+    font-size: 22px;
     font-weight: 800;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     font-family: var(--font-mono);
     letter-spacing: -0.02em;
 }
 .change-up { color: var(--red); text-shadow: 0 0 20px var(--red-glow); }
 .change-down { color: var(--green); text-shadow: 0 0 20px var(--green-glow); }
 
-.stock-card .meta {
+.stock-card .stats-row {
     display: flex;
-    gap: 12px;
-    font-size: 14px;
+    gap: 16px;
+    font-size: 13px;
     color: #c8d5e0;
     font-weight: 500;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    font-family: var(--font-mono);
 }
-.stock-card .meta span { display: flex; align-items: center; gap: 3px; }
+.stock-card .stat-label {
+    color: var(--text-muted);
+    margin-right: 4px;
+    font-size: 12px;
+}
 
 .stock-card .holders {
     display: flex;
@@ -688,7 +705,7 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
     .charts-row { grid-template-columns: 1fr; }
     .nav { flex-wrap: wrap; gap: 8px; padding: 8px 16px; height: auto; }
     .nav-controls { flex-wrap: wrap; gap: 8px; }
-    .cards-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+    .cards-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
     .content { padding: 16px; }
 }
 @media (max-width: 600px) {

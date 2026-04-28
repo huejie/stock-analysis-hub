@@ -20,9 +20,18 @@ if not exist .env (
     exit /b 1
 )
 
-:: Check Python
-where python >nul 2>&1
-if %errorlevel% neq 0 (
+:: Check Python (prefer py launcher, fallback to python)
+set "PY="
+where py >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY=py"
+) else (
+    where python >nul 2>&1
+    if %errorlevel% equ 0 (
+        set "PY=python"
+    )
+)
+if not defined PY (
     echo [ERROR] Python not found! Please install Python 3.10+.
     pause
     exit /b 1
@@ -31,7 +40,7 @@ if %errorlevel% neq 0 (
 :: Create venv if not exists
 if not exist .venv\Scripts\activate.bat (
     echo [INFO] Creating virtual environment...
-    python -m venv .venv
+    %PY% -m venv .venv
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to create virtual environment.
         pause
@@ -44,23 +53,46 @@ if not exist .venv\Scripts\activate.bat (
 call .venv\Scripts\activate.bat
 
 :: Install dependencies
-echo [INFO] Installing dependencies...
+echo [INFO] Installing Python dependencies...
 pip install -r requirements.txt -q
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install dependencies.
     pause
     exit /b 1
 )
-echo [OK] Dependencies installed.
+echo [OK] Python dependencies installed.
 
-:: Create data directory
+:: Build frontend if not built
+if not exist frontend\dist\index.html (
+    echo [INFO] Building frontend...
+    where npm >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [ERROR] Node.js/npm not found! Install Node.js to build the frontend.
+        echo Or manually run: cd frontend ^&^& npm install ^&^& npm run build
+        pause
+        exit /b 1
+    )
+    cd frontend
+    call npm install
+    call npx vite build
+    cd ..
+    if not exist frontend\dist\index.html (
+        echo [ERROR] Frontend build failed.
+        pause
+        exit /b 1
+    )
+    echo [OK] Frontend built.
+)
+
+:: Create data directories
 if not exist data mkdir data
 if not exist uploads mkdir uploads
 
-:: Start server
+:: Start server and open browser
 echo.
 echo [OK] Starting server on http://localhost:8888
 echo Press Ctrl+C to stop.
 echo.
 
+start http://localhost:8888/admin
 python run.py
