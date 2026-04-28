@@ -18,7 +18,21 @@
       "Bash(.venv/Scripts/python.exe -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('prev_count:', len\\(d.get\\('prev_records',[]\\)\\), 'prev_codes:', [r['stock_code'] for r in d.get\\('prev_records',[]\\)]\\)\")",
       "Bash(.venv/Scripts/python.exe -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('prev_count:', len\\(d.get\\('prev_records',[]\\)\\)\\)\")",
       "Bash(D:/my-projects/stock-analysis-hub/.venv/Scripts/python.exe -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('prev_count:', len\\(d.get\\('prev_records',[]\\)\\), 'prev_codes:', [r['stock_code'] for r in d.get\\('prev_records',[]\\)]\\)\")",
-      "Bash(D:/my-projects/stock-analysis-hub/.venv/Scripts/python.exe -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('prev_count:', len\\(d.get\\('prev_records',[]\\)\\), 'codes:', [r['stock_code'] for r in d.get\\('prev_records',[]\\)]\\)\")"
+      "Bash(D:/my-projects/stock-analysis-hub/.venv/Scripts/python.exe -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('prev_count:', len\\(d.get\\('prev_records',[]\\)\\), 'codes:', [r['stock_code'] for r in d.get\\('prev_records',[]\\)]\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_ocr_parser.py -v)",
+      "Bash(D:/my-projects/stock-analysis-hub/.venv/Scripts/python.exe -c ' *)",
+      "Bash(tasklist)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill *)",
+      "mcp__chrome-devtools__take_snapshot",
+      "Bash(curl -s -X POST http://localhost:8888/api/season-stats -H \"Content-Type: application/json\" -d \"{\\\\\"records\\\\\":[{\\\\\"date\\\\\":\\\\\"2026-03-02\\\\\",\\\\\"per_capital_pnl\\\\\":-2.52,\\\\\"per_capital_position\\\\\":81.95}]}\")",
+      "Bash(curl *)",
+      "Bash(wmic process *)",
+      "mcp__chrome-devtools__click",
+      "mcp__chrome-devtools__list_pages",
+      "Bash(python -c \"import sys,json; rows=json.load\\(sys.stdin\\); print\\(f'count={len\\(rows\\)}, first={rows[0][\\\\\"date\\\\\"] if rows else \\\\\"none\\\\\"}, last={rows[-1][\\\\\"date\\\\\"] if rows else \\\\\"none\\\\\"}'\\)\")",
+      "Bash(taskkill //PID 17436 //T //F)",
+      "Bash(.venv/Scripts/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --reload)"
     ]
   }
 }

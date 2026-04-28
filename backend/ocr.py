@@ -129,6 +129,8 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
             "holders_today": None,
             "holders_yesterday": None,
             "price_action": "",
+            "per_capital_pnl": None,
+            "per_capital_position": None,
         }
 
         # 股票名称 + 热度值
@@ -186,6 +188,16 @@ def parse_ocr_text(text: str, record_date: str) -> list[dict]:
         yesterday_match = re.search(r'昨日[：:]\s*(\d+)', full_text)
         if yesterday_match:
             record["holders_yesterday"] = int(yesterday_match.group(1))
+
+        # 人均盈亏（正负均可，格式如 "人均盈亏-2.3万" 或 "人均盈亏+1.5万"）
+        pnl_match = re.search(r'人均盈亏\s*([+-]?[\d.]+)\s*万', full_text)
+        if pnl_match:
+            record["per_capital_pnl"] = float(pnl_match.group(1))
+
+        # 人均仓位（格式如 "人均仓位12.5万"）
+        pos_match = re.search(r'人均仓位\s*([\d.]+)\s*万', full_text)
+        if pos_match:
+            record["per_capital_position"] = float(pos_match.group(1))
 
         # 板块概念标签
         for sector in KNOWN_SECTORS:

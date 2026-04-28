@@ -3,13 +3,13 @@ let currentView = 'daily';
 let parsedData = null;
 let availableDates = [];
 const chartInstances = new Map();
+const isAdmin = window.location.pathname === '/admin';
 
 // ========== DOM ==========
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 const datePicker = $('#datePicker');
-const dateHistory = $('#dateHistory');
 const uploadArea = $('#uploadArea');
 const fileInput = $('#fileInput');
 const uploadBtn = $('#uploadBtn');
@@ -49,18 +49,30 @@ function getChart(id) {
     return chart;
 }
 
+// 日期短格式: "2026-04-28" → "4/28"
+function fmtShort(dateStr) {
+    if (!dateStr) return '';
+    const [y, m, d] = dateStr.split('-');
+    return `${parseInt(m)}/${parseInt(d)}`;
+}
+
+function fmtDate(d) {
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 // ========== Init ==========
 document.addEventListener('DOMContentLoaded', async () => {
-    // Re-assign DOM refs in case they weren't ready at parse time
     const dp = document.getElementById('datePicker');
     const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-    dp.value = today;
+    dp.value = fmtDate(d);
+    if (!isAdmin) {
+        $('#uploadBtn').style.display = 'none';
+        $('#uploadArea').style.display = 'none';
+    }
     await loadDates();
     loadView();
 });
 
-// Debounced resize
 let resizeTimer;
 window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
@@ -78,71 +90,63 @@ function showToast(msg, type = 'success') {
     setTimeout(() => toast.classList.remove('show'), 2500);
 }
 
-// ========== Nav ==========
+// ========== Nav Tabs ==========
 $$('.tabs .btn').forEach(btn => {
     btn.addEventListener('click', () => {
         $$('.tabs .btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentView = btn.dataset.view;
 
-        if (currentView === 'daily') {
-            $('#rangeGroup').style.display = 'none';
-            loadView();
-            return;
-        }
+        // Show/hide controls based on view
+        $('#dateGroup').style.display = currentView === 'daily' ? 'flex' : 'none';
 
-        const rangeType = btn.dataset.range;
-        const end = new Date();
-        const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-        const endStr = fmt(end);
-
-        if (rangeType === 'custom') {
-            $('#rangeGroup').style.display = 'flex';
-            return;
-        }
-
-        // Preset range: 7, 30, 90 days
-        $('#rangeGroup').style.display = 'none';
-        const days = parseInt(rangeType);
-        const start = new Date(end);
-        start.setDate(start.getDate() - days + 1);
-        $('#rangeStart').value = fmt(start);
-        $('#rangeEnd').value = endStr;
-        loadRangeView();
+        if (currentView === 'daily') { loadView(); return; }
+        if (currentView === 'pnl') { loadPnlView(); return; }
+        if (currentView === 'range') { loadRangeView(); return; }
     });
 });
 
+// Date navigation
 datePicker.addEventListener('change', loadView);
 
 $('#prevDateBtn').addEventListener('click', () => {
-    // 跳到上一个有数据的交易日
     const idx = availableDates.indexOf(datePicker.value);
     if (idx >= 0 && idx < availableDates.length - 1) {
-        datePicker.value = availableDates[idx + 1]; // dates are DESC
+        datePicker.value = availableDates[idx + 1];
         loadView();
     }
 });
 $('#nextDateBtn').addEventListener('click', () => {
     const idx = availableDates.indexOf(datePicker.value);
     if (idx > 0) {
-        datePicker.value = availableDates[idx - 1]; // dates are DESC
-        loadView();
-    }
-});
-dateHistory.addEventListener('change', () => {
-    if (dateHistory.value) {
-        datePicker.value = dateHistory.value;
+        datePicker.value = availableDates[idx - 1];
         loadView();
     }
 });
 
+// Range filter preset buttons
+let rangeDays = 30;
+
+$$('.range-presets .btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        $$('.range-presets .btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const days = btn.dataset.days;
+        rangeDays = days === 'custom' ? 'custom' : parseInt(days);
+        $('.range-custom-range').style.display = days === 'custom' ? 'flex' : 'none';
+        if (days !== 'custom') loadRangeView();
+    });
+});
+
+$('#rangeQueryBtn').addEventListener('click', loadRangeView);
+
+// Upload
 uploadBtn.addEventListener('click', () => {
     const visible = uploadArea.style.display !== 'none';
     uploadArea.style.display = visible ? 'none' : 'block';
     if (!visible) uploadArea.scrollIntoView({ behavior: 'smooth' });
 });
 
-// ========== Upload ==========
 uploadArea.addEventListener('click', () => fileInput.click());
 uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
 uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
@@ -158,7 +162,6 @@ async function handleFile(file) {
     formData.append('file', file);
     uploadBtn.textContent = '识别中...';
     uploadBtn.disabled = true;
-
     try {
         const resp = await fetch('/api/upload', { method: 'POST', body: formData });
         if (!resp.ok) throw new Error(await resp.text());
@@ -176,13 +179,10 @@ async function handleFile(file) {
 function showConfirmModal(data) {
     editTableBody.innerHTML = '';
     $('#modalCount').textContent = `识别到 ${data.records.length} 只股票`;
-
-    // Set date in modal
     const modalDate = $('#modalDatePicker');
     modalDate.value = data.date;
     const hint = $('#dateDetectHint');
     hint.textContent = '从截图中识别' + (data.date === new Date().toISOString().slice(0, 10) ? '（默认今日）' : '');
-
     data.records.forEach((r, i) => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
@@ -209,7 +209,6 @@ function showConfirmModal(data) {
 cancelBtn.addEventListener('click', () => { confirmModal.classList.remove('show'); parsedData = null; });
 
 confirmBtn.addEventListener('click', async () => {
-    // Use the date from modal picker
     parsedData.date = $('#modalDatePicker').value;
     try {
         const resp = await fetch('/api/records', {
@@ -234,51 +233,36 @@ async function loadDates() {
     const resp = await fetch('/api/dates');
     const data = await resp.json();
     availableDates = data.dates || [];
-
-    dateHistory.innerHTML = '<option value="">历史记录</option>';
-    availableDates.slice().reverse().forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d;
-        opt.textContent = d;
-        dateHistory.appendChild(opt);
-    });
-
     if (availableDates.length > 0) {
         if (!datePicker.value || !availableDates.includes(datePicker.value)) {
-            datePicker.value = availableDates[0]; // most recent
+            datePicker.value = availableDates[0];
         }
     }
 }
 
 async function loadView() {
-    // Dispose old charts
     chartInstances.forEach(c => c && !c.isDisposed() && c.dispose());
     chartInstances.clear();
-
-    // Hide all views first
-    $('#emptyState').style.display = 'none';
-    $('#dailyView').style.display = 'none';
-    $('#rangeView').style.display = 'none';
-
-    if (currentView === 'range') {
-        // Range view needs explicit query, don't auto-load
-        return;
-    }
+    hideAllViews();
 
     const date = datePicker.value;
-
     try {
-        if (currentView === 'daily') {
-            const resp = await fetch(`/api/stats/daily?date=${date}`);
-            if (!resp.ok) throw new Error('no data');
-            const data = await resp.json();
-            $('#dailyView').style.display = 'block';
-            await new Promise(r => requestAnimationFrame(r));
-            renderDaily(data);
-        }
+        const resp = await fetch(`/api/stats/daily?date=${date}`);
+        if (!resp.ok) throw new Error('no data');
+        const data = await resp.json();
+        $('#dailyView').style.display = 'block';
+        await new Promise(r => requestAnimationFrame(r));
+        renderDaily(data);
     } catch {
         $('#emptyState').style.display = 'block';
     }
+}
+
+function hideAllViews() {
+    $('#emptyState').style.display = 'none';
+    $('#dailyView').style.display = 'none';
+    $('#rangeView').style.display = 'none';
+    $('#pnlView').style.display = 'none';
 }
 
 // ========== Daily Render ==========
@@ -288,7 +272,7 @@ function getRankChange(code, todayRecords, prevRecs) {
     const today = todayRecords.find(r => r.stock_code === code);
     const prev = prevRecs.find(r => r.stock_code === code);
     if (!today || !prev) return '';
-    const diff = prev.rank - today.rank; // positive = rank improved
+    const diff = prev.rank - today.rank;
     if (diff === 0) return '';
     if (diff > 0) return `<span class="badge badge-up">&#9650;${diff}</span>`;
     return `<span class="badge badge-down">&#9660;${Math.abs(diff)}</span>`;
@@ -346,8 +330,8 @@ function renderCards(records, prevCodes) {
     }).join('');
 }
 
-function renderRemovedCards(prevRecords, todayCodes) {
-    const removed = prevRecords.filter(r => !todayCodes.has(r.stock_code));
+function renderRemovedCards(prevRecs, todayCodes) {
+    const removed = prevRecs.filter(r => !todayCodes.has(r.stock_code));
     const container = $('#removedGrid');
     const title = $('#removedTitle');
     if (!container) return;
@@ -388,15 +372,13 @@ function renderChangeChart(records) {
             type: 'value',
             axisLabel: { color: CHART_COLORS.textMuted, formatter: '{value}%', fontSize: 11 },
             splitLine: { lineStyle: { color: CHART_COLORS.line } },
-            axisLine: { show: false },
-            axisTick: { show: false },
+            axisLine: { show: false }, axisTick: { show: false },
         },
         yAxis: {
             type: 'category',
             data: sorted.map(r => r.stock_name),
             inverse: true,
-            axisLine: { show: false },
-            axisTick: { show: false },
+            axisLine: { show: false }, axisTick: { show: false },
             axisLabel: { color: CHART_COLORS.text, fontSize: 12, fontWeight: 600 },
         },
         series: [{
@@ -410,11 +392,9 @@ function renderChangeChart(records) {
             })),
             barWidth: '60%',
             label: {
-                show: true,
-                position: 'right',
+                show: true, position: 'right',
                 formatter: (p) => (p.value >= 0 ? '+' : '') + p.value + '%',
-                fontSize: 11,
-                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
                 color: CHART_COLORS.text,
             },
             animationDelay: (idx) => idx * 60,
@@ -430,14 +410,12 @@ function renderHoldersChart(records) {
         ...CHART_BASE,
         grid: { left: 70, right: 16, top: 40, bottom: 30, containLabel: false },
         legend: {
-            data: ['今日', '昨日'],
-            top: 0,
+            data: ['今日', '昨日'], top: 0,
             textStyle: { color: CHART_COLORS.text, fontSize: 11 },
             itemWidth: 12, itemHeight: 8, itemGap: 16,
         },
         xAxis: {
-            type: 'category',
-            data: records.map(r => r.stock_name),
+            type: 'category', data: records.map(r => r.stock_name),
             axisLabel: { color: CHART_COLORS.textMuted, rotate: 25, fontSize: 10 },
             axisLine: { lineStyle: { color: CHART_COLORS.line } },
             axisTick: { show: false },
@@ -445,8 +423,7 @@ function renderHoldersChart(records) {
         yAxis: {
             type: 'value',
             splitLine: { lineStyle: { color: CHART_COLORS.line } },
-            axisLine: { show: false },
-            axisTick: { show: false },
+            axisLine: { show: false }, axisTick: { show: false },
             axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11 },
         },
         series: [
@@ -468,29 +445,296 @@ function renderHoldersChart(records) {
     });
 }
 
-// ========== Range Query ==========
-$('#rangeQueryBtn').addEventListener('click', loadRangeView);
+// ========== PnL View ==========
+let pnlDays = 60; // default: 近60天
 
-// Set default range dates
-$('#rangeStart').value = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-$('#rangeEnd').value = new Date().toISOString().slice(0, 10);
-
-async function loadRangeView() {
-    const start = $('#rangeStart').value;
-    const end = $('#rangeEnd').value;
-    if (!start || !end) { showToast('请选择起止日期', 'error'); return; }
-
+async function loadPnlView() {
     chartInstances.forEach(c => c && !c.isDisposed() && c.dispose());
     chartInstances.clear();
-    $('#emptyState').style.display = 'none';
-    $('#dailyView').style.display = 'none';
-    $('#rangeView').style.display = 'none';
+    hideAllViews();
+
+    let url = '/api/season-stats';
+    if (pnlDays && pnlDays !== 'custom') {
+        const days = parseInt(pnlDays);
+        if (days > 0) {
+            const end = fmtDate(new Date());
+            const d = new Date();
+            d.setDate(d.getDate() - days + 1);
+            const start = fmtDate(d);
+            url = `/api/season-stats?start=${start}&end=${end}`;
+        }
+    } else if (pnlDays === 'custom') {
+        const start = $('#pnlStart').value;
+        const end = $('#pnlEnd').value;
+        if (start && end) url = `/api/season-stats?start=${start}&end=${end}`;
+    }
+
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('no data');
+        const rows = await resp.json();
+        if (rows.length === 0) throw new Error('no data');
+
+        $('#pnlDateLabel').textContent = `${fmtShort(rows[0].date)} - ${fmtShort(rows[rows.length-1].date)} (${rows.length}天)`;
+        if (!isAdmin) $('#pnlInputBtn').style.display = 'none';
+        $('#pnlView').style.display = 'block';
+        await new Promise(r => requestAnimationFrame(r));
+        requestAnimationFrame(() => {
+            renderPnlChart(rows);
+            renderPositionChart(rows);
+        });
+    } catch {
+        $('#pnlView').style.display = 'block';
+        $('#pnlDateLabel').textContent = '暂无数据，点击「录入数据」添加';
+        await new Promise(r => requestAnimationFrame(r));
+    }
+}
+
+// PnL filter preset buttons
+$$('.pnl-presets .btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        $$('.pnl-presets .btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const days = btn.dataset.days;
+        pnlDays = days === 'custom' ? 'custom' : parseInt(days);
+        $('.pnl-custom-range').style.display = days === 'custom' ? 'flex' : 'none';
+        if (days !== 'custom') loadPnlView();
+    });
+});
+
+$('#pnlQueryBtn').addEventListener('click', loadPnlView);
+
+function renderPnlChart(rows) {
+    const chart = getChart('pnlChart');
+    if (!chart) return;
+    const dates = rows.map(r => fmtShort(r.date));
+    const pnl = rows.map(r => r.per_capital_pnl);
+    let cum = 0;
+    const cumPnl = pnl.map(v => {
+        cum += (v || 0);
+        return Math.round(cum * 100) / 100;
+    });
+    chart.setOption({
+        ...CHART_BASE,
+        grid: { left: 60, right: 60, top: 40, bottom: 30, containLabel: false },
+        legend: {
+            data: ['每日盈亏', '累计盈亏'], top: 0,
+            textStyle: { color: CHART_COLORS.text, fontSize: 11 },
+            itemWidth: 14, itemHeight: 3, itemGap: 20,
+        },
+        tooltip: {
+            trigger: 'axis',
+            backgroundColor: '#111622', borderColor: '#1e293b',
+            textStyle: { color: '#f1f5f9', fontSize: 12 },
+            formatter: (params) => {
+                const daily = params.find(p => p.seriesName === '每日盈亏');
+                const cum = params.find(p => p.seriesName === '累计盈亏');
+                let s = `${params[0].axisValue}<br/>`;
+                if (daily) {
+                    const c = daily.value >= 0 ? '#ef4444' : '#10b981';
+                    s += `${daily.marker} 当日: <span style="color:${c}">${daily.value >= 0 ? '+' : ''}${daily.value}%</span><br/>`;
+                }
+                if (cum) {
+                    const c = cum.value >= 0 ? '#f59e0b' : '#06b6d4';
+                    s += `${cum.marker} 累计: <span style="color:${c}">${cum.value >= 0 ? '+' : ''}${cum.value}%</span>`;
+                }
+                return s;
+            },
+        },
+        xAxis: {
+            type: 'category', data: dates,
+            axisLabel: { color: CHART_COLORS.textMuted, rotate: 30, fontSize: 10 },
+            axisLine: { lineStyle: { color: CHART_COLORS.line } },
+            axisTick: { show: false },
+        },
+        yAxis: [
+            {
+                type: 'value', name: '每日%',
+                nameTextStyle: { color: CHART_COLORS.textMuted, fontSize: 11 },
+                splitLine: { lineStyle: { color: CHART_COLORS.line } },
+                axisLine: { show: false }, axisTick: { show: false },
+                axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11, formatter: '{value}%' },
+            },
+            {
+                type: 'value', name: '累计%',
+                nameTextStyle: { color: CHART_COLORS.textMuted, fontSize: 11 },
+                splitLine: { show: false },
+                axisLine: { show: false }, axisTick: { show: false },
+                axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11, formatter: '{value}%' },
+            },
+        ],
+        series: [
+            {
+                name: '每日盈亏', type: 'line', yAxisIndex: 0,
+                data: pnl,
+                lineStyle: { width: 2, color: '#94a3b8' },
+                itemStyle: {
+                    color: (params) => params.value >= 0 ? '#ef4444' : '#10b981',
+                },
+                symbolSize: 5, symbol: 'circle',
+                markLine: {
+                    silent: true, data: [{ yAxis: 0 }],
+                    lineStyle: { color: '#475569', type: 'solid', width: 1 },
+                    label: { show: false },
+                },
+            },
+            {
+                name: '累计盈亏', type: 'line', yAxisIndex: 1,
+                data: cumPnl,
+                lineStyle: { width: 2.5, color: '#f59e0b' },
+                itemStyle: { color: '#f59e0b' },
+                symbolSize: 0, symbol: 'circle',
+                emphasis: { symbolSize: 6 },
+                areaStyle: {
+                    opacity: 0.1,
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                        { offset: 0, color: '#f59e0b' },
+                        { offset: 1, color: 'transparent' },
+                    ]),
+                },
+            },
+        ],
+        animationEasing: 'cubicOut',
+    });
+}
+
+function renderPositionChart(rows) {
+    const chart = getChart('positionChart');
+    if (!chart) return;
+    const dates = rows.map(r => fmtShort(r.date));
+    const positions = rows.map(r => r.per_capital_position);
+    chart.setOption({
+        ...CHART_BASE,
+        grid: { left: 60, right: 20, top: 30, bottom: 30, containLabel: false },
+        tooltip: {
+            trigger: 'axis',
+            backgroundColor: '#111622', borderColor: '#1e293b',
+            textStyle: { color: '#f1f5f9', fontSize: 12 },
+            formatter: (params) => `${params[0].axisValue}<br/>仓位: ${params[0].value}%`,
+        },
+        xAxis: {
+            type: 'category', data: dates,
+            axisLabel: { color: CHART_COLORS.textMuted, rotate: 30, fontSize: 10 },
+            axisLine: { lineStyle: { color: CHART_COLORS.line } },
+            axisTick: { show: false },
+        },
+        yAxis: {
+            type: 'value', name: '%', min: (value) => Math.floor(value.min - 5),
+            nameTextStyle: { color: CHART_COLORS.textMuted, fontSize: 11 },
+            splitLine: { lineStyle: { color: CHART_COLORS.line } },
+            axisLine: { show: false }, axisTick: { show: false },
+            axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11, formatter: '{value}%' },
+        },
+        series: [{
+            type: 'line', data: positions,
+            lineStyle: { width: 2.5, color: CHART_COLORS.cyan },
+            itemStyle: { color: CHART_COLORS.cyan },
+            symbolSize: 5, symbol: 'circle',
+            areaStyle: {
+                opacity: 0.12,
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: CHART_COLORS.cyan },
+                    { offset: 1, color: 'transparent' },
+                ]),
+            },
+            markLine: {
+                silent: true, data: [{ type: 'average', name: '平均' }],
+                lineStyle: { color: CHART_COLORS.amber, type: 'dashed' },
+                label: { color: CHART_COLORS.amber, fontSize: 10, formatter: '均值 {c}%' },
+            },
+        }],
+        animationEasing: 'cubicOut',
+    });
+}
+
+// ---- PnL Input Modal ----
+$('#pnlInputBtn').addEventListener('click', () => showPnlModal());
+$('#pnlCancelBtn').addEventListener('click', () => $('#pnlModal').classList.remove('show'));
+$('#pnlAddRowBtn').addEventListener('click', () => addPnlRow());
+
+$('#pnlSaveBtn').addEventListener('click', async () => {
+    const rows = collectPnlRows();
+    if (rows.length === 0) { showToast('请至少添加一行数据', 'error'); return; }
+    for (const r of rows) {
+        if (!r.date) { showToast('日期不能为空', 'error'); return; }
+    }
+    try {
+        const resp = await fetch('/api/season-stats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ records: rows }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const result = await resp.json();
+        $('#pnlModal').classList.remove('show');
+        showToast(`保存成功，共 ${result.count} 条记录`);
+        loadPnlView();
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+});
+
+function showPnlModal() {
+    const tbody = $('#pnlTableBody');
+    tbody.innerHTML = '';
+    addPnlRow();
+    $('#pnlModalCount').textContent = '';
+    $('#pnlModal').classList.add('show');
+}
+
+function addPnlRow() {
+    const tbody = $('#pnlTableBody');
+    const tr = document.createElement('tr');
+    const today = new Date().toISOString().slice(0, 10);
+    tr.innerHTML = `
+        <td><input type="date" value="${today}" class="pnl-date"></td>
+        <td><input type="number" step="0.01" placeholder="如 2.35" class="pnl-val"></td>
+        <td><input type="number" step="0.01" placeholder="如 81.95" class="pos-val"></td>
+        <td><button class="btn-icon pnl-del-btn" title="删除">&#10005;</button></td>
+    `;
+    tr.querySelector('.pnl-del-btn').addEventListener('click', () => tr.remove());
+    tbody.appendChild(tr);
+    $('#pnlModalCount').textContent = `${tbody.children.length} 行`;
+}
+
+function collectPnlRows() {
+    const rows = [];
+    $$('#pnlTableBody tr').forEach(tr => {
+        const date = tr.querySelector('.pnl-date').value;
+        const pnl = tr.querySelector('.pnl-val').value;
+        const pos = tr.querySelector('.pos-val').value;
+        if (!date) return;
+        rows.push({
+            date,
+            per_capital_pnl: pnl ? parseFloat(pnl) : null,
+            per_capital_position: pos ? parseFloat(pos) : null,
+        });
+    });
+    return rows;
+}
+
+// ========== Range View ==========
+async function loadRangeView() {
+    chartInstances.forEach(c => c && !c.isDisposed() && c.dispose());
+    chartInstances.clear();
+    hideAllViews();
+
+    let start, end;
+    if (rangeDays === 'custom') {
+        start = $('#rangeStart').value;
+        end = $('#rangeEnd').value;
+    } else if (rangeDays > 0) {
+        end = fmtDate(new Date());
+        const d = new Date();
+        d.setDate(d.getDate() - rangeDays + 1);
+        start = fmtDate(d);
+    }
+    if (!start || !end) { showToast('请选择起止日期', 'error'); return; }
 
     try {
         const resp = await fetch(`/api/records/range?start=${start}&end=${end}`);
         if (!resp.ok) throw new Error('no data');
         const records = await resp.json();
-        // Parse sector_tags
         records.forEach(r => {
             if (typeof r.sector_tags === 'string') {
                 try { r.sector_tags = JSON.parse(r.sector_tags); } catch { r.sector_tags = []; }
@@ -498,7 +742,7 @@ async function loadRangeView() {
         });
         if (records.length === 0) throw new Error('no data');
 
-        $('#rangeDateLabel').textContent = `${start} ~ ${end} (${records.length}条)`;
+        $('#rangeDateLabel').textContent = `${fmtShort(start)} ~ ${fmtShort(end)} (${records.length}条)`;
         $('#rangeView').style.display = 'block';
         await new Promise(r => requestAnimationFrame(r));
         requestAnimationFrame(() => {
@@ -607,8 +851,8 @@ function renderTrendChart(records) {
             itemWidth: 14, itemHeight: 3, itemGap: 16,
         },
         xAxis: {
-            type: 'category', data: dates,
-            axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11 },
+            type: 'category', data: dates.map(fmtShort),
+            axisLabel: { color: CHART_COLORS.textMuted, rotate: 30, fontSize: 10 },
             axisLine: { lineStyle: { color: CHART_COLORS.line } },
             axisTick: { show: false },
         },
@@ -621,21 +865,16 @@ function renderTrendChart(records) {
         },
         tooltip: {
             trigger: 'axis',
-            backgroundColor: '#111622',
-            borderColor: '#1e293b',
+            backgroundColor: '#111622', borderColor: '#1e293b',
             textStyle: { color: '#f1f5f9', fontSize: 12 },
         },
         series: top5.map((name, i) => ({
-            name,
-            type: 'line',
+            name, type: 'line',
             data: dates.map(d => {
                 const r = records.find(r => r.date === d && r.stock_name === name);
                 return r ? r.heat_value : null;
             }),
             connectNulls: true,
-            smooth: true,
-            symbolSize: 6,
-            symbol: 'circle',
             lineStyle: { width: 2.5, color: palette[i] },
             itemStyle: { color: palette[i] },
             areaStyle: {
@@ -668,7 +907,7 @@ function renderHoldersTrendChart(records) {
             itemWidth: 14, itemHeight: 3, itemGap: 16,
         },
         xAxis: {
-            type: 'category', data: dates,
+            type: 'category', data: dates.map(fmtShort),
             axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11 },
             axisLine: { lineStyle: { color: CHART_COLORS.line } },
             axisTick: { show: false },
@@ -686,7 +925,7 @@ function renderHoldersTrendChart(records) {
             textStyle: { color: '#f1f5f9', fontSize: 12 },
         },
         series: top5.map((name, i) => ({
-            name, type: 'line', smooth: true,
+            name, type: 'line',
             data: dates.map(d => {
                 const r = records.find(r => r.date === d && r.stock_name === name);
                 return r ? r.holders_today : null;
@@ -714,9 +953,9 @@ function renderHeatMapChart(records) {
         ...CHART_BASE,
         grid: { left: 90, right: 60, top: 10, bottom: 40, containLabel: false },
         xAxis: {
-            type: 'category', data: dates,
+            type: 'category', data: dates.map(fmtShort),
             splitArea: { show: true, areaStyle: { color: ['rgba(30,41,59,0.3)', 'transparent'] } },
-            axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11 },
+            axisLabel: { color: CHART_COLORS.textMuted, fontSize: 11, rotate: 30 },
             axisLine: { show: false }, axisTick: { show: false },
         },
         yAxis: {

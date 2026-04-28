@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>股票热榜分析</title>
+    <title>StockPulse</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
@@ -15,26 +15,15 @@
             <h1>StockPulse</h1>
         </div>
         <div class="nav-controls">
-            <div class="date-group">
+            <div class="tabs">
+                <button class="btn btn-outline active" data-view="daily">日报</button>
+                <button class="btn btn-outline" data-view="pnl">盈亏走势</button>
+                <button class="btn btn-outline" data-view="range">时段分析</button>
+            </div>
+            <div class="date-group" id="dateGroup">
                 <button class="btn-icon" id="prevDateBtn" title="前一天">&#9664;</button>
                 <input type="date" id="datePicker">
                 <button class="btn-icon" id="nextDateBtn" title="后一天">&#9654;</button>
-                <select id="dateHistory" class="date-history">
-                    <option value="">历史记录</option>
-                </select>
-            </div>
-            <div class="tabs">
-                <button class="btn btn-outline active" data-view="daily">日报</button>
-                <button class="btn btn-outline" data-view="range" data-range="7">周报</button>
-                <button class="btn btn-outline" data-view="range" data-range="30">月报</button>
-                <button class="btn btn-outline" data-view="range" data-range="90">近三月</button>
-                <button class="btn btn-outline" data-view="range" data-range="custom">自定义</button>
-            </div>
-            <div class="range-group" id="rangeGroup" style="display:none">
-                <input type="date" id="rangeStart">
-                <span class="range-sep">至</span>
-                <input type="date" id="rangeEnd">
-                <button class="btn btn-primary btn-sm" id="rangeQueryBtn">查询</button>
             </div>
             <button class="btn btn-primary" id="uploadBtn">上传图片</button>
         </div>
@@ -83,11 +72,58 @@
                 </div>
             </div>
 
-            <!-- Range View (replaces weekly + monthly) -->
+            <!-- PnL View -->
+            <div id="pnlView" style="display:none">
+                <div class="section-title">
+                    <span class="section-icon">&#9670;</span> 盈亏走势
+                    <span class="section-date" id="pnlDateLabel"></span>
+                    <button class="btn btn-primary btn-sm" id="pnlInputBtn" style="margin-left:auto">录入数据</button>
+                </div>
+                <div class="pnl-filter">
+                    <div class="pnl-presets">
+                        <button class="btn btn-outline btn-sm" data-days="30">近30天</button>
+                        <button class="btn btn-outline btn-sm active" data-days="60">近60天</button>
+                        <button class="btn btn-outline btn-sm" data-days="90">近90天</button>
+                        <button class="btn btn-outline btn-sm" data-days="0">全部</button>
+                        <button class="btn btn-outline btn-sm" data-days="custom">自定义</button>
+                    </div>
+                    <div class="pnl-custom-range" style="display:none">
+                        <input type="date" id="pnlStart">
+                        <span class="range-sep">至</span>
+                        <input type="date" id="pnlEnd">
+                        <button class="btn btn-primary btn-sm" id="pnlQueryBtn">查询</button>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <h3>人均盈亏 & 累计走势</h3>
+                    <div class="chart-container" id="pnlChart" style="height:400px"></div>
+                </div>
+                <div class="chart-box">
+                    <h3>人均仓位</h3>
+                    <div class="chart-container" id="positionChart" style="height:360px"></div>
+                </div>
+            </div>
+
+            <!-- Range View -->
             <div id="rangeView" style="display:none">
                 <div class="section-title">
                     <span class="section-icon">&#9670;</span> 时段分析
                     <span class="section-date" id="rangeDateLabel"></span>
+                </div>
+                <div class="pnl-filter">
+                    <div class="range-presets">
+                        <button class="btn btn-outline btn-sm" data-days="7">近7天</button>
+                        <button class="btn btn-outline btn-sm active" data-days="30">近30天</button>
+                        <button class="btn btn-outline btn-sm" data-days="90">近90天</button>
+                        <button class="btn btn-outline btn-sm" data-days="0">全部</button>
+                        <button class="btn btn-outline btn-sm" data-days="custom">自定义</button>
+                    </div>
+                    <div class="pnl-custom-range range-custom-range" style="display:none">
+                        <input type="date" id="rangeStart">
+                        <span class="range-sep">至</span>
+                        <input type="date" id="rangeEnd">
+                        <button class="btn btn-primary btn-sm" id="rangeQueryBtn">查询</button>
+                    </div>
                 </div>
                 <div class="charts-row">
                     <div class="chart-box">
@@ -144,6 +180,33 @@
             <div class="actions">
                 <button class="btn btn-outline" id="cancelBtn">取消</button>
                 <button class="btn btn-primary" id="confirmBtn">确认保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Season Input Modal -->
+    <div class="modal-overlay" id="pnlModal">
+        <div class="modal" style="max-width:700px">
+            <div class="modal-header">
+                <h2>录入盈亏数据</h2>
+                <span class="modal-count" id="pnlModalCount"></span>
+            </div>
+            <p class="modal-hint">按日期录入每天的人均盈亏(%)和人均仓位(%)，已有日期会自动覆盖</p>
+            <div class="table-wrap">
+                <table class="edit-table">
+                    <thead>
+                        <tr>
+                            <th>日期</th><th>人均盈亏(%)</th><th>人均仓位(%)</th><th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="pnlTableBody"></tbody>
+                </table>
+            </div>
+            <div class="actions" style="gap:12px">
+                <button class="btn btn-outline" id="pnlAddRowBtn">+ 添加一行</button>
+                <div style="flex:1"></div>
+                <button class="btn btn-outline" id="pnlCancelBtn">取消</button>
+                <button class="btn btn-primary" id="pnlSaveBtn">保存</button>
             </div>
         </div>
     </div>

@@ -612,15 +612,6 @@ input[type="date"]:focus { outline: none; background: var(--bg-elevated); }
 input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cursor: pointer; }
 
 /* ===== Range Group ===== */
-.range-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 2px 8px;
-}
 .range-sep {
     color: var(--text-muted);
     font-size: 12px;
@@ -630,6 +621,33 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
     font-size: 12px;
 }
 .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+/* ===== PnL Filter ===== */
+.pnl-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+.pnl-presets {
+    display: flex;
+    gap: 4px;
+}
+.pnl-presets .btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+}
+.pnl-custom-range {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.pnl-custom-range input[type="date"] {
+    padding: 4px 6px;
+    font-size: 12px;
+}
 
 /* ===== Modal Date Row ===== */
 .modal-date-row {

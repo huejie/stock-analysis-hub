@@ -14,6 +14,8 @@ class StockRecord(BaseModel):
     holders_today: Optional[int] = None
     holders_yesterday: Optional[int] = None
     price_action: Optional[str] = None
+    per_capital_pnl: Optional[float] = None
+    per_capital_position: Optional[float] = None
 
 
 class StockRecordResponse(StockRecord):

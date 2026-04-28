@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from backend.config import settings
 from backend.database import Database
@@ -25,6 +25,16 @@ if frontend_dir.exists():
 
 @app.get("/")
 async def index():
+    return RedirectResponse(url="/preview")
+
+
+@app.get("/preview")
+async def preview():
+    return FileResponse(str(frontend_dir / "index.html"))
+
+
+@app.get("/admin")
+async def admin():
     return FileResponse(str(frontend_dir / "index.html"))
 
 
@@ -150,3 +160,67 @@ async def monthly_stats(end_date: str):
         if row.get("sector_tags"):
             row["sector_tags"] = json.loads(row["sector_tags"])
     return {"start_date": start, "end_date": end_date, "records": rows}
+
+
+# ---- 赛季统计 ----
+
+@app.post("/api/season-stats")
+async def save_season_stats(data: dict):
+    """批量保存赛季每日统计数据。格式: {"records": [{"date":"2026-04-27","per_capital_pnl":0.02,"per_capital_position":81.95}, ...]}"""
+    records = data.get("records", [])
+    if not records:
+        raise HTTPException(400, "无数据")
+    for r in records:
+        if not r.get("date"):
+            raise HTTPException(400, "每条记录必须包含 date")
+    try:
+        db.upsert_season_stats(records)
+    except Exception as e:
+        raise HTTPException(400, f"保存失败: {str(e)}")
+    return {"status": "ok", "count": len(records)}
+
+
+@app.get("/api/season-stats")
+async def get_season_stats(start: str = "", end: str = ""):
+    """查询赛季统计数据。"""
+    rows = db.query_season_stats(start, end)
+    return rows
+
+
+@app.get("/api/season-stats/dates")
+async def get_season_dates():
+    """获取所有赛季数据日期。"""
+    return {"dates": db.get_season_dates()}
+
+
+# ---- 赛季管理 ----
+
+@app.get("/api/seasons")
+async def get_seasons():
+    """获取所有赛季。"""
+    return db.get_all_seasons()
+
+
+@app.post("/api/seasons")
+async def create_season(data: dict):
+    """创建赛季。格式: {"name":"第2赛季","start_date":"2026-05-01","end_date":"2026-06-30"}"""
+    name = data.get("name", "")
+    start = data.get("start_date", "")
+    end = data.get("end_date", "")
+    if not name or not start or not end:
+        raise HTTPException(400, "name, start_date, end_date 均必填")
+    return db.create_season(name, start, end)
+
+
+@app.put("/api/seasons/{season_id}")
+async def update_season(season_id: int, data: dict):
+    """更新赛季信息。"""
+    ok = db.update_season(
+        season_id,
+        name=data.get("name"),
+        start_date=data.get("start_date"),
+        end_date=data.get("end_date"),
+    )
+    if not ok:
+        raise HTTPException(400, "无更新")
+    return {"status": "ok"}
