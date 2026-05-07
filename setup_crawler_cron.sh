@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 顽主杯数据爬虫 cron 定时任务安装脚本
-# 每天 20:00 自动执行爬虫
+# 每天 19:00 自动执行爬虫
 #
 # 用法:
 #   bash setup_crawler_cron.sh          # 安装
@@ -13,7 +13,7 @@ ENTRY="$PROJECT_DIR/crawl.py"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 CRON_MARKER="stock-crawler"
 CRON_CMD="cd $PROJECT_DIR && $VENV_PYTHON $ENTRY >> $PROJECT_DIR/data/crawler.log 2>&1"
-CRON_ENTRY="0 20 * * * $CRON_CMD  # $CRON_MARKER"
+CRON_ENTRY="0 19 * * * $CRON_CMD  # $CRON_MARKER"
 
 if [ "$1" = "remove" ]; then
     echo "正在移除爬虫 cron 任务..."
