@@ -130,9 +130,9 @@ def fetch_quotes(codes: list[str], date_str: str) -> dict[str, dict]:
         {code: {"price_change_pct": float, "turnover_amount": float, "price_action": str}}
     """
     result: dict[str, dict] = {}
-    # 取目标日期前后各1天，确保能算涨跌幅
+    # 往前多推几天，覆盖长假期（如清明节、国庆节）
     dt = date.fromisoformat(date_str)
-    start = (dt - timedelta(days=3)).strftime("%Y-%m-%d")
+    start = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
 
     for code in codes:
         try:
