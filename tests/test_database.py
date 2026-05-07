@@ -42,6 +42,9 @@ def test_insert_and_query_record(db):
         "holders_today": 42,
         "holders_yesterday": 35,
         "price_action": "上午震荡回落-下午大幅冲高回落",
+        "per_capital_pnl": None,
+        "per_capital_position": None,
+        "total_fund": 1911.55,
     }
     db.insert_record(record)
     rows = db.query_by_date("2026-04-27")
@@ -64,6 +67,9 @@ def test_unique_constraint(db):
         "holders_today": 42,
         "holders_yesterday": 35,
         "price_action": "上午震荡回落",
+        "per_capital_pnl": None,
+        "per_capital_position": None,
+        "total_fund": 1911.55,
     }
     db.insert_record(record)
     with pytest.raises(sqlite3.IntegrityError):
@@ -78,6 +84,8 @@ def test_query_date_range(db):
             "sector_tags": '[]', "price_change_pct": 1.0,
             "turnover_amount": 10.0, "holders_today": 10,
             "holders_yesterday": 8, "price_action": "",
+            "per_capital_pnl": None, "per_capital_position": None,
+            "total_fund": 100.0,
         })
     rows = db.query_date_range("2026-04-25", "2026-04-26")
     assert len(rows) == 2
@@ -91,6 +99,8 @@ def test_get_all_dates(db):
             "sector_tags": '[]', "price_change_pct": 1.0,
             "turnover_amount": 10.0, "holders_today": 10,
             "holders_yesterday": 8, "price_action": "",
+            "per_capital_pnl": None, "per_capital_position": None,
+            "total_fund": 100.0,
         })
     dates = db.get_all_dates()
     assert "2026-04-25" in dates

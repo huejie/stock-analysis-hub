@@ -11,6 +11,7 @@ data/*.db
 data/backup/
 data/ocr_debug.txt
 data/ocr_debug_latest.txt
+data/crawler.log
 
 # Uploads
 uploads/*.png

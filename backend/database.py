@@ -41,6 +41,8 @@ class Database:
                 conn.execute("ALTER TABLE stock_records ADD COLUMN per_capital_pnl REAL")
             if "per_capital_position" not in cols:
                 conn.execute("ALTER TABLE stock_records ADD COLUMN per_capital_position REAL")
+            if "total_fund" not in cols:
+                conn.execute("ALTER TABLE stock_records ADD COLUMN total_fund REAL")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS season_daily_stats (
@@ -82,12 +84,12 @@ class Database:
                     (date, rank, stock_name, stock_code, heat_value,
                      sector_tags, price_change_pct, turnover_amount,
                      holders_today, holders_yesterday, price_action,
-                     per_capital_pnl, per_capital_position)
+                     per_capital_pnl, per_capital_position, total_fund)
                 VALUES
                     (:date, :rank, :stock_name, :stock_code, :heat_value,
                      :sector_tags, :price_change_pct, :turnover_amount,
                      :holders_today, :holders_yesterday, :price_action,
-                     :per_capital_pnl, :per_capital_position)
+                     :per_capital_pnl, :per_capital_position, :total_fund)
             """, record)
 
     def insert_records(self, records: list[dict]):
@@ -97,12 +99,43 @@ class Database:
                     (date, rank, stock_name, stock_code, heat_value,
                      sector_tags, price_change_pct, turnover_amount,
                      holders_today, holders_yesterday, price_action,
-                     per_capital_pnl, per_capital_position)
+                     per_capital_pnl, per_capital_position, total_fund)
                 VALUES
                     (:date, :rank, :stock_name, :stock_code, :heat_value,
                      :sector_tags, :price_change_pct, :turnover_amount,
                      :holders_today, :holders_yesterday, :price_action,
-                     :per_capital_pnl, :per_capital_position)
+                     :per_capital_pnl, :per_capital_position, :total_fund)
+            """, records)
+
+    def upsert_records(self, records: list[dict]):
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO stock_records
+                    (date, rank, stock_name, stock_code, heat_value,
+                     sector_tags, price_change_pct, turnover_amount,
+                     holders_today, holders_yesterday, price_action,
+                     per_capital_pnl, per_capital_position, total_fund)
+                VALUES
+                    (:date, :rank, :stock_name, :stock_code, :heat_value,
+                     :sector_tags, :price_change_pct, :turnover_amount,
+                     :holders_today, :holders_yesterday, :price_action,
+                     :per_capital_pnl, :per_capital_position, :total_fund)
+                ON CONFLICT(date, stock_code) DO UPDATE SET
+                    rank = excluded.rank,
+                    stock_name = excluded.stock_name,
+                    heat_value = COALESCE(excluded.heat_value, stock_records.heat_value),
+                    sector_tags = COALESCE(excluded.sector_tags, stock_records.sector_tags),
+                    price_change_pct = COALESCE(excluded.price_change_pct, stock_records.price_change_pct),
+                    turnover_amount = COALESCE(excluded.turnover_amount, stock_records.turnover_amount),
+                    holders_today = COALESCE(excluded.holders_today, stock_records.holders_today),
+                    holders_yesterday = COALESCE(excluded.holders_yesterday, stock_records.holders_yesterday),
+                    price_action = CASE
+                        WHEN excluded.price_action = '' THEN stock_records.price_action
+                        ELSE excluded.price_action
+                    END,
+                    per_capital_pnl = COALESCE(excluded.per_capital_pnl, stock_records.per_capital_pnl),
+                    per_capital_position = COALESCE(excluded.per_capital_position, stock_records.per_capital_position),
+                    total_fund = COALESCE(excluded.total_fund, stock_records.total_fund)
             """, records)
 
     def query_by_date(self, date: str) -> list[dict]:

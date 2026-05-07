@@ -24,6 +24,16 @@ python run.py
 # Docker 启动
 docker-compose up --build
 
+# 手动运行爬虫（爬取今天数据）
+python crawl.py
+
+# 手动运行爬虫（爬取指定日期）
+python crawl.py 2026-04-30
+
+# Linux 安装 cron 定时任务（每天 20:00 自动爬取）
+bash setup_crawler_cron.sh        # 安装
+bash setup_crawler_cron.sh remove # 卸载
+
 # 运行全部测试
 pytest
 
@@ -39,13 +49,20 @@ pytest -v  # 详细输出
 
 `图片上传` → `POST /api/upload` → `百度 OCR API` → `parse_ocr_text()` 正则解析 → `前端确认/编辑 Modal` → `POST /api/records` → `SQLite`
 
+或自动爬取流程：
+
+`cron 20:00` → `crawl.py` → `顽主杯 API`（股票热榜 + 收益数据） → `upsert_records` → `SQLite`
+
 ### Backend (FastAPI, Python)
 
-- **`backend/main.py`** — FastAPI 应用入口，所有 API 路由（14 个端点）。模块级 `db` 实例，测试通过 `monkeypatch` 替换。静态文件服务优先从 `frontend/dist/`（构建产物），fallback 到 `frontend/`（开发模式）。
+- **`backend/main.py`** — FastAPI 应用入口，所有 API 路由。模块级 `db` 实例，测试通过 `monkeypatch` 替换。静态文件服务优先从 `frontend/dist/`（构建产物），fallback 到 `frontend/`（开发模式）。
 - **`backend/ocr.py`** — 核心解析逻辑。`ocr_image()` 调百度 OCR API（httpx 同步）；`parse_ocr_text()` 用"中文名+热度值(w)"锚点定位，不依赖排名数字。`KNOWN_SECTORS` 硬编码板块关键词列表。
+- **`backend/crawler.py`** — 顽主杯数据爬虫。从 `api.hunanwanzhu.com` 爬取股票热榜和收益数据，映射到数据库字段后写入。`is_trade_day()` 含 2026 年节假日/调休日历。使用 `upsert_records` 支持重复执行。
 - **`backend/database.py`** — SQLite 封装，三张表：`stock_records`（主数据，`UNIQUE(date, stock_code)`）、`season_daily_stats`（赛季每日盈亏，`ON CONFLICT DO UPDATE`）、`seasons`（命名时间范围）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。
 - **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（13 字段，stock_code 必须正好 6 位数字）、`UploadResult`。
 - **`backend/config.py`** — `pydantic-settings` 从 `.env` 加载，路径默认相对于项目根目录。
+- **`crawl.py`** — 爬虫入口脚本（cron 调用），支持 `python crawl.py [YYYY-MM-DD]`。日志输出到 `data/crawler.log`。
+- **`setup_crawler_cron.sh`** — Linux cron 安装/卸载脚本，每天 20:00 触发爬虫。
 
 ### Frontend (Vue 3 + TypeScript + Vite)
 
@@ -63,6 +80,7 @@ pytest -v  # 详细输出
 - **OCR 锚点模式**：百度 OCR 经常漏识别排名数字，所以用"股票名+热度值"锚点定位，排名按锚点出现顺序推算。
 - **两步保存**：上传返回识别结果供前端编辑确认，确认后才写入数据库，保证 OCR 数据准确性。
 - **SQLite 零配置**：`data/stock.db` 自动创建，无 ORM，原生参数化 SQL。schema 迁移靠 `_init_db()` 里的 `ALTER TABLE`。
+- **数据双入口**：OCR 手动上传和 API 自动爬取都可以写入数据，`upsert_records` 处理冲突（新字段 COALESCE 保留旧值，空字符串 price_action 不覆盖）。
 - **Admin vs Preview 角色**：纯 URL 路径区分，无认证。`/admin` 可上传和录入数据，`/preview` 只读。
 - **红涨绿跌**：中国市场惯例，CSS 和图表配色一致使用。
 
@@ -82,6 +100,12 @@ BAIDU_OCR_SECRET_KEY=xxx
 - 数据库和 API 测试各自用独立测试 DB（`data/test_*.db`）
 - OCR 解析测试直接调用 `parse_ocr_text()`，不调百度 API
 
+## Utility Scripts
+
+- **`seed_data.py`** — 生成模拟数据填充数据库（开发测试用）
+- **`backup.py`** — 数据库备份脚本，配合 `setup_backup_task.bat` 做定时备份
+- **`start.bat`** / **`start.sh`** — 一键启动脚本（安装依赖 + 启动后端）
+
 ## API Endpoints
 
 | Method | Path | Purpose |
@@ -94,5 +118,6 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/stats/weekly?end_date=` | 周报（往前7天） |
 | GET | `/api/stats/monthly?end_date=` | 月报（往前30天） |
 | GET | `/api/dates` | 所有有数据的日期列表 |
-| POST/GET | `/api/seasons/...` | 赛季 CRUD |
-| POST/GET | `/api/season-daily-stats/...` | 赛季每日盈亏数据 |
+| POST/GET | `/api/season-stats` | 赛季每日盈亏数据（批量保存 / 按范围查询） |
+| GET | `/api/season-stats/dates` | 赛季数据所有日期列表 |
+| GET/POST/PUT | `/api/seasons` | 赛季 CRUD（列表 / 创建 / 更新） |

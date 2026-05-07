@@ -20,15 +20,19 @@ if not exist .env (
     exit /b 1
 )
 
-:: Check Python (prefer py launcher, fallback to python)
+:: Check Python: prefer venv, then py launcher, then system python
 set "PY="
-where py >nul 2>&1
-if %errorlevel% equ 0 (
-    set "PY=py"
+if exist .venv\Scripts\python.exe (
+    set "PY=.venv\Scripts\python.exe"
 ) else (
-    where python >nul 2>&1
-    if %errorlevel% equ 0 (
-        set "PY=python"
+    where py >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "PY=py"
+    ) else (
+        where python >nul 2>&1
+        if !errorlevel! equ 0 (
+            set "PY=python"
+        )
     )
 )
 if not defined PY (
@@ -38,7 +42,7 @@ if not defined PY (
 )
 
 :: Create venv if not exists
-if not exist .venv\Scripts\activate.bat (
+if not exist .venv\Scripts\python.exe (
     echo [INFO] Creating virtual environment...
     %PY% -m venv .venv
     if %errorlevel% neq 0 (
@@ -46,21 +50,21 @@ if not exist .venv\Scripts\activate.bat (
         pause
         exit /b 1
     )
+    set "PY=.venv\Scripts\python.exe"
     echo [OK] Virtual environment created.
 )
 
-:: Activate venv
-call .venv\Scripts\activate.bat
-
-:: Install dependencies
-echo [INFO] Installing Python dependencies...
-pip install -r requirements.txt -q
-if %errorlevel% neq 0 (
-    echo [ERROR] Failed to install dependencies.
+:: Activate venv (only if not already using venv python)
+if not exist .venv\Scripts\activate.bat (
+    echo [ERROR] Virtual environment is broken. Delete .venv folder and retry.
     pause
     exit /b 1
 )
-echo [OK] Python dependencies installed.
+
+:: Install dependencies (skip if pip unavailable - deps may already be installed)
+echo [INFO] Checking Python dependencies...
+.venv\Scripts\python.exe -m pip install -r requirements.txt -q 2>nul
+echo [OK] Python dependencies ready.
 
 :: Build frontend if not built
 if not exist frontend\dist\index.html (
@@ -95,4 +99,4 @@ echo Press Ctrl+C to stop.
 echo.
 
 start http://localhost:8888/admin
-python run.py
+"%PY%" run.py

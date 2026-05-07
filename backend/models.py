@@ -4,7 +4,7 @@ from typing import Optional
 
 class StockRecord(BaseModel):
     date: str = Field(default="", pattern=r"^\d{4}-\d{2}-\d{2}$")
-    rank: int = Field(..., ge=1, le=10)
+    rank: int = Field(..., ge=1)
     stock_name: str
     stock_code: str = Field(..., pattern=r"^\d{6}$")
     heat_value: Optional[float] = None
@@ -16,6 +16,7 @@ class StockRecord(BaseModel):
     price_action: Optional[str] = None
     per_capital_pnl: Optional[float] = None
     per_capital_position: Optional[float] = None
+    total_fund: Optional[float] = None
 
 
 class StockRecordResponse(StockRecord):
