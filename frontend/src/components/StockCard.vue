@@ -28,7 +28,7 @@ const props = defineProps<{
         {{ record.price_change_pct! >= 0 ? '+' : '' }}{{ record.price_change_pct }}%
       </div>
       <div class="stats-row">
-        <span class="stat"><span class="stat-label">热度</span>{{ record.heat_value }}w</span>
+        <span class="stat"><span class="stat-label">热度</span>{{ record.heat_value ? Math.round(record.heat_value * 100) / 100 : '' }}w</span>
         <span class="stat"><span class="stat-label">成交</span>{{ record.turnover_amount || 0 }}亿</span>
       </div>
       <div class="holders">

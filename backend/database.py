@@ -175,7 +175,7 @@ class Database:
                 VALUES (:date, :per_capital_pnl, :per_capital_position)
                 ON CONFLICT(date) DO UPDATE SET
                     per_capital_pnl = excluded.per_capital_pnl,
-                    per_capital_position = excluded.per_capital_position
+                    per_capital_position = COALESCE(excluded.per_capital_position, season_daily_stats.per_capital_position)
             """, records)
 
     def query_season_stats(self, start: str = "", end: str = "") -> list[dict]:

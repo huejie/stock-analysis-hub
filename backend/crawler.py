@@ -104,7 +104,7 @@ def fetch_stock_data(date_str: str) -> list[dict]:
             "rank": idx,
             "stock_name": item.get("stock_name", ""),
             "stock_code": code,
-            "heat_value": None,
+            "heat_value": item.get("total_fund"),
             "sector_tags": json.dumps([], ensure_ascii=False),
             "price_change_pct": q.get("price_change_pct"),
             "turnover_amount": q.get("turnover_amount"),
@@ -204,7 +204,7 @@ def fetch_income_data() -> list[dict]:
         records.append({
             "date": item["stock_date"],
             "per_capital_pnl": _parse_pct(today_income),
-            "per_capital_position": _parse_pct(total_income),
+            "per_capital_position": None,
         })
 
     return records
