@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 
 from backend.config import settings
+from backend.crawler import crawl_and_save
 from backend.database import Database
 from backend.models import UploadResult
 from backend.ocr import analyze_image
@@ -102,6 +103,21 @@ async def get_records_range(start: str, end: str):
         if row.get("sector_tags"):
             row["sector_tags"] = json.loads(row["sector_tags"])
     return rows
+
+
+@app.post("/api/crawl")
+async def crawl_today():
+    """手动触发爬虫，拉取今天数据。"""
+    import asyncio
+    try:
+        result = await asyncio.to_thread(crawl_and_save, db)
+        if result["skipped"]:
+            return {"status": "ok", "message": f"{result['date']} 非交易日，已跳过", "date": result["date"], "stock_count": 0}
+        if result["stock_count"] == 0:
+            return {"status": "ok", "message": f"{result['date']} 暂无数据", "date": result["date"], "stock_count": 0}
+        return {"status": "ok", "message": f"拉取成功，{result['date']} 共 {result['stock_count']} 只股票", "date": result["date"], "stock_count": result["stock_count"]}
+    except Exception as e:
+        raise HTTPException(500, f"爬取失败: {str(e)}")
 
 
 @app.get("/api/dates")

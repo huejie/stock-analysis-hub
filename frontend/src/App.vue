@@ -17,6 +17,8 @@ provide('isAdmin', isAdmin)
 
 const currentTab = ref<ViewTab>('daily')
 const showUpload = ref(false)
+const crawlCount = ref(0)
+const crawling = ref(false)
 const toastMsg = ref('')
 const toastVisible = ref(false)
 const toastColor = ref('#10b981')
@@ -55,6 +57,20 @@ async function confirmSave(data: { date: string; records: StockRecord[] }) {
   }
 }
 
+async function handleCrawl() {
+  crawling.value = true
+  try {
+    const res = await api.crawlToday()
+    showToast(res.message)
+    currentTab.value = 'daily'
+    crawlCount.value++
+  } catch (e: unknown) {
+    showToast('拉取失败: ' + (e instanceof Error ? e.message : String(e)), 'error')
+  } finally {
+    crawling.value = false
+  }
+}
+
 const currentView = computed(() => {
   switch (currentTab.value) {
     case 'daily': return DailyView
@@ -88,6 +104,9 @@ const currentView = computed(() => {
             {{ tab.label }}
           </button>
         </div>
+        <button v-if="isAdmin" class="btn btn-primary" :disabled="crawling" @click="handleCrawl">
+          {{ crawling ? '拉取中...' : '拉取数据' }}
+        </button>
         <button v-if="isAdmin" class="btn btn-primary" @click="showUpload = !showUpload">
           上传图片
         </button>
@@ -107,7 +126,7 @@ const currentView = computed(() => {
       />
 
       <!-- Main Content -->
-      <component :is="currentView" />
+      <component :is="currentView" :key="crawlCount" />
     </div>
 
     <!-- Confirm Modal -->

@@ -58,8 +58,8 @@ pytest -v  # 详细输出
 - **`backend/main.py`** — FastAPI 应用入口，所有 API 路由。模块级 `db` 实例，测试通过 `monkeypatch` 替换。静态文件服务优先从 `frontend/dist/`（构建产物），fallback 到 `frontend/`（开发模式）。
 - **`backend/ocr.py`** — 核心解析逻辑。`ocr_image()` 调百度 OCR API（httpx 同步）；`parse_ocr_text()` 用"中文名+热度值(w)"锚点定位，不依赖排名数字。`KNOWN_SECTORS` 硬编码板块关键词列表。
 - **`backend/crawler.py`** — 顽主杯数据爬虫。从 `api.hunanwanzhu.com` 爬取股票热榜和收益数据，映射到数据库字段后写入。`is_trade_day()` 含 2026 年节假日/调休日历。使用 `upsert_records` 支持重复执行。
-- **`backend/database.py`** — SQLite 封装，三张表：`stock_records`（主数据，`UNIQUE(date, stock_code)`）、`season_daily_stats`（赛季每日盈亏，`ON CONFLICT DO UPDATE`）、`seasons`（命名时间范围）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。
-- **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（13 字段，stock_code 必须正好 6 位数字）、`UploadResult`。
+- **`backend/database.py`** — SQLite 封装，三张表：`stock_records`（主数据，`UNIQUE(date, stock_code)`，含 `total_fund` 字段）、`season_daily_stats`（赛季每日盈亏，`ON CONFLICT DO UPDATE`）、`seasons`（命名时间范围）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。空库时自动创建默认赛季。
+- **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（14 字段含 `total_fund`，stock_code 必须正好 6 位数字）、`StockRecordResponse`（含 id/created_at）、`UploadResult`、`DateInfo`。
 - **`backend/config.py`** — `pydantic-settings` 从 `.env` 加载，路径默认相对于项目根目录。
 - **`crawl.py`** — 爬虫入口脚本（cron 调用），支持 `python crawl.py [YYYY-MM-DD]`。日志输出到 `data/crawler.log`。
 - **`setup_crawler_cron.sh`** — Linux cron 安装/卸载脚本，每天 20:00 触发爬虫。

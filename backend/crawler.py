@@ -220,12 +220,15 @@ def _parse_pct(value: str) -> float | None:
         return None
 
 
-def crawl_and_save(db: Database | None = None, target_date: date | None = None):
+def crawl_and_save(db: Database | None = None, target_date: date | None = None) -> dict:
     """主函数：爬取数据并存入数据库。
 
     Args:
         db: 数据库实例，默认自动创建。
         target_date: 目标日期，默认为今天。
+
+    Returns:
+        {"date": str, "stock_count": int, "income_count": int, "skipped": bool}
     """
     if db is None:
         db = Database()
@@ -238,28 +241,33 @@ def crawl_and_save(db: Database | None = None, target_date: date | None = None):
 
     if not is_trade_day(target_date):
         logger.info("%s 非交易日，跳过", target_str)
-        return
+        return {"date": target_str, "stock_count": 0, "income_count": 0, "skipped": True}
 
     # 爬取股票数据
+    stock_count = 0
     stock_records = fetch_stock_data(target_str)
     if stock_records:
         try:
             db.upsert_records(stock_records)
-            logger.info("股票数据入库成功: %d 条", len(stock_records))
+            stock_count = len(stock_records)
+            logger.info("股票数据入库成功: %d 条", stock_count)
         except Exception as e:
             logger.error("股票数据入库失败: %s", e)
     else:
         logger.warning("未获取到股票数据")
 
     # 爬取收益数据（全量更新）
+    income_count = 0
     income_records = fetch_income_data()
     if income_records:
         try:
             db.upsert_season_stats(income_records)
-            logger.info("收益数据入库成功: %d 条", len(income_records))
+            income_count = len(income_records)
+            logger.info("收益数据入库成功: %d 条", income_count)
         except Exception as e:
             logger.error("收益数据入库失败: %s", e)
     else:
         logger.warning("未获取到收益数据")
 
     logger.info("===== 爬取完成 %s =====", target_str)
+    return {"date": target_str, "stock_count": stock_count, "income_count": income_count, "skipped": False}

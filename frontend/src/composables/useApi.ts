@@ -49,5 +49,8 @@ export function useApi() {
 
     saveSeasonStats: (records: SeasonDailyStat[]) =>
       request<SaveResponse>({ url: '/api/season-stats', method: 'POST', body: JSON.stringify({ records }) }),
+
+    crawlToday: () =>
+      request<{ status: string; message: string }>({ url: '/api/crawl', method: 'POST' }),
   }
 }
