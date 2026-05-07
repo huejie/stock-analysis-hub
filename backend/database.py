@@ -63,6 +63,66 @@ class Database:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lhb_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    stock_name TEXT NOT NULL,
+                    close_price REAL,
+                    change_rate REAL,
+                    billboard_buy_amt REAL,
+                    billboard_sell_amt REAL,
+                    billboard_net_amt REAL,
+                    billboard_deal_amt REAL,
+                    deal_net_ratio REAL,
+                    deal_amount_ratio REAL,
+                    turnover_rate REAL,
+                    reason TEXT,
+                    d1_change REAL,
+                    d2_change REAL,
+                    d5_change REAL,
+                    d10_change REAL,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(date, stock_code, reason)
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lhb_trading_desk (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    stock_name TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    dept_name TEXT NOT NULL,
+                    buy_amt REAL,
+                    sell_amt REAL,
+                    net_amt REAL,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(date, stock_code, side, dept_name)
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lhb_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    stock_name TEXT NOT NULL,
+                    signal_type TEXT NOT NULL,
+                    close_price REAL,
+                    change_rate REAL,
+                    buy_amt REAL,
+                    sell_amt REAL,
+                    net_amt REAL,
+                    inst_count INTEGER,
+                    concept_tags TEXT,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(date, stock_code, signal_type)
+                )
+            """)
+
             # 自动创建默认赛季（如果表为空且有数据）
             count = conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0]
             if count == 0:
@@ -240,3 +300,95 @@ class Database:
         with self._get_conn() as conn:
             conn.execute(f"UPDATE seasons SET {', '.join(sets)} WHERE id = ?", params)
             return True
+
+    # ---- 龙虎榜 ----
+
+    def upsert_lhb_records(self, records: list[dict]):
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO lhb_records
+                    (date, stock_code, stock_name, close_price, change_rate,
+                     billboard_buy_amt, billboard_sell_amt, billboard_net_amt,
+                     billboard_deal_amt, deal_net_ratio, deal_amount_ratio,
+                     turnover_rate, reason, d1_change, d2_change, d5_change, d10_change)
+                VALUES
+                    (:date, :stock_code, :stock_name, :close_price, :change_rate,
+                     :billboard_buy_amt, :billboard_sell_amt, :billboard_net_amt,
+                     :billboard_deal_amt, :deal_net_ratio, :deal_amount_ratio,
+                     :turnover_rate, :reason, :d1_change, :d2_change, :d5_change, :d10_change)
+                ON CONFLICT(date, stock_code, reason) DO UPDATE SET
+                    stock_name = excluded.stock_name,
+                    close_price = COALESCE(excluded.close_price, lhb_records.close_price),
+                    change_rate = COALESCE(excluded.change_rate, lhb_records.change_rate),
+                    billboard_buy_amt = COALESCE(excluded.billboard_buy_amt, lhb_records.billboard_buy_amt),
+                    billboard_sell_amt = COALESCE(excluded.billboard_sell_amt, lhb_records.billboard_sell_amt),
+                    billboard_net_amt = COALESCE(excluded.billboard_net_amt, lhb_records.billboard_net_amt),
+                    billboard_deal_amt = COALESCE(excluded.billboard_deal_amt, lhb_records.billboard_deal_amt),
+                    turnover_rate = COALESCE(excluded.turnover_rate, lhb_records.turnover_rate),
+                    d1_change = COALESCE(excluded.d1_change, lhb_records.d1_change),
+                    d2_change = COALESCE(excluded.d2_change, lhb_records.d2_change),
+                    d5_change = COALESCE(excluded.d5_change, lhb_records.d5_change),
+                    d10_change = COALESCE(excluded.d10_change, lhb_records.d10_change)
+            """, records)
+
+    def upsert_lhb_trading_desk(self, records: list[dict]):
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO lhb_trading_desk
+                    (date, stock_code, stock_name, side, dept_name, buy_amt, sell_amt, net_amt)
+                VALUES
+                    (:date, :stock_code, :stock_name, :side, :dept_name, :buy_amt, :sell_amt, :net_amt)
+                ON CONFLICT(date, stock_code, side, dept_name) DO UPDATE SET
+                    stock_name = excluded.stock_name,
+                    buy_amt = COALESCE(excluded.buy_amt, lhb_trading_desk.buy_amt),
+                    sell_amt = COALESCE(excluded.sell_amt, lhb_trading_desk.sell_amt),
+                    net_amt = COALESCE(excluded.net_amt, lhb_trading_desk.net_amt)
+            """, records)
+
+    def upsert_lhb_signals(self, records: list[dict]):
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO lhb_signals
+                    (date, stock_code, stock_name, signal_type, close_price, change_rate,
+                     buy_amt, sell_amt, net_amt, inst_count, concept_tags)
+                VALUES
+                    (:date, :stock_code, :stock_name, :signal_type, :close_price, :change_rate,
+                     :buy_amt, :sell_amt, :net_amt, :inst_count, :concept_tags)
+                ON CONFLICT(date, stock_code, signal_type) DO UPDATE SET
+                    stock_name = excluded.stock_name,
+                    close_price = COALESCE(excluded.close_price, lhb_signals.close_price),
+                    change_rate = COALESCE(excluded.change_rate, lhb_signals.change_rate),
+                    buy_amt = COALESCE(excluded.buy_amt, lhb_signals.buy_amt),
+                    sell_amt = COALESCE(excluded.sell_amt, lhb_signals.sell_amt),
+                    net_amt = COALESCE(excluded.net_amt, lhb_signals.net_amt),
+                    inst_count = COALESCE(excluded.inst_count, lhb_signals.inst_count),
+                    concept_tags = COALESCE(excluded.concept_tags, lhb_signals.concept_tags)
+            """, records)
+
+    def query_lhb_signals(self, date: str = "") -> list[dict]:
+        with self._get_conn() as conn:
+            if date:
+                rows = conn.execute(
+                    "SELECT * FROM lhb_signals WHERE date = ? ORDER BY signal_type, net_amt DESC",
+                    (date,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM lhb_signals ORDER BY date DESC, signal_type, net_amt DESC"
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def query_lhb_signals_range(self, start: str, end: str) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM lhb_signals WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+                (start, end),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_lhb_signal_dates(self) -> list[str]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT date FROM lhb_signals ORDER BY date DESC"
+            ).fetchall()
+            return [r["date"] for r in rows]

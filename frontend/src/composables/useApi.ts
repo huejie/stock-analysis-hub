@@ -3,6 +3,8 @@ import type {
   StockRecord,
   SeasonDailyStat,
   SaveResponse,
+  LhbSignal,
+  LhbAnalysis,
 } from '../types'
 
 async function request<T>(urlOrInit: string | (RequestInit & { url: string })): Promise<T> {
@@ -52,5 +54,21 @@ export function useApi() {
 
     crawlToday: () =>
       request<{ status: string; message: string }>({ url: '/api/crawl', method: 'POST' }),
+
+    fetchLhbSignals: (date?: string) => {
+      const params = date ? `?date=${date}` : ''
+      return request<LhbSignal[]>(`/api/lhb/signals${params}`)
+    },
+
+    fetchLhbSignalDates: () =>
+      request<{ dates: string[] }>('/api/lhb/signal-dates'),
+
+    fetchLhbAnalysis: (months: number = 3) =>
+      request<LhbAnalysis>(`/api/lhb/analysis?months=${months}`),
+
+    crawlLhb: (targetDate?: string) => {
+      const params = targetDate ? `?date=${targetDate}` : ''
+      return request<{ status: string; message: string }>({ url: `/api/crawl-lhb${params}`, method: 'POST' })
+    },
   }
 }

@@ -6,6 +6,7 @@ import { useApi } from './composables/useApi'
 import DailyView from './views/DailyView.vue'
 import PnlView from './views/PnlView.vue'
 import RangeView from './views/RangeView.vue'
+import LhbView from './views/LhbView.vue'
 import UploadArea from './components/UploadArea.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 
@@ -76,6 +77,7 @@ const currentView = computed(() => {
     case 'daily': return DailyView
     case 'pnl': return PnlView
     case 'range': return RangeView
+    case 'lhb': return LhbView
   }
 })
 </script>
@@ -95,6 +97,7 @@ const currentView = computed(() => {
               { key: 'daily', label: '日报' },
               { key: 'pnl', label: '盈亏走势' },
               { key: 'range', label: '时段分析' },
+              { key: 'lhb', label: '龙虎榜' },
             ] as const)"
             :key="tab.key"
             class="btn btn-outline"

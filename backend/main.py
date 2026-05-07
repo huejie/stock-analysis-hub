@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from backend.config import settings
 from backend.crawler import crawl_and_save
 from backend.database import Database
+from backend.lhb_crawler import crawl_lhb
 from backend.models import UploadResult
 from backend.ocr import analyze_image
 
@@ -248,3 +249,93 @@ async def update_season(season_id: int, data: dict):
     if not ok:
         raise HTTPException(400, "无更新")
     return {"status": "ok"}
+
+
+# ---- 龙虎榜 ----
+
+@app.post("/api/crawl-lhb")
+async def crawl_lhb_today(target_date: str | None = None):
+    """手动触发龙虎榜爬虫。可选 ?date=YYYY-MM-DD 指定日期。"""
+    import asyncio
+    try:
+        td = date.fromisoformat(target_date) if target_date else None
+        result = await asyncio.to_thread(crawl_lhb, db, td)
+        return {
+            "status": "ok",
+            "message": f"龙虎榜 {result['date']}：汇总 {result['summary_count']} 条，信号股 {result['signal_count']} 只",
+            **result,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"龙虎榜爬取失败: {str(e)}")
+
+
+@app.get("/api/lhb/signals")
+async def get_lhb_signals(date: str = ""):
+    """查询龙虎榜信号股。不传 date 返回所有。"""
+    if date:
+        rows = db.query_lhb_signals(date)
+    else:
+        rows = db.query_lhb_signals()
+    for row in rows:
+        if row.get("concept_tags"):
+            row["concept_tags"] = json.loads(row["concept_tags"])
+    return rows
+
+
+@app.get("/api/lhb/signal-dates")
+async def get_lhb_signal_dates():
+    """获取龙虎榜信号股所有日期。"""
+    return {"dates": db.get_lhb_signal_dates()}
+
+
+@app.get("/api/lhb/analysis")
+async def lhb_analysis(months: int = 3):
+    """龙虎榜近 N 个月板块分析。返回概念板块出现频率和平均涨跌幅。"""
+    end = date.today()
+    start = end - timedelta(days=months * 30)
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+
+    rows = db.query_lhb_signals_range(start_str, end_str)
+
+    # 统计概念板块出现频率
+    sector_freq: dict[str, dict] = {}
+    for row in rows:
+        tags = json.loads(row.get("concept_tags") or "[]")
+        change = row.get("change_rate")
+        for tag in tags:
+            if tag not in sector_freq:
+                sector_freq[tag] = {"count": 0, "total_change": 0.0, "change_list": []}
+            sector_freq[tag]["count"] += 1
+            if change is not None:
+                sector_freq[tag]["total_change"] += change
+                sector_freq[tag]["change_list"].append(change)
+
+    # 按出现频率排序，取 Top 30
+    sorted_sectors = sorted(sector_freq.items(), key=lambda x: x[1]["count"], reverse=True)[:30]
+    result = []
+    for tag, info in sorted_sectors:
+        avg_change = info["total_change"] / len(info["change_list"]) if info["change_list"] else None
+        result.append({
+            "sector": tag,
+            "count": info["count"],
+            "avg_change": round(avg_change, 2) if avg_change is not None else None,
+        })
+
+    # 按信号类型统计
+    type_stats = {}
+    for row in rows:
+        st = row.get("signal_type", "unknown")
+        if st not in type_stats:
+            type_stats[st] = {"count": 0, "total_net": 0.0}
+        type_stats[st]["count"] += 1
+        net = row.get("net_amt") or 0
+        type_stats[st]["total_net"] += net
+
+    return {
+        "start_date": start_str,
+        "end_date": end_str,
+        "total_signals": len(rows),
+        "sector_distribution": result,
+        "signal_type_stats": type_stats,
+    }

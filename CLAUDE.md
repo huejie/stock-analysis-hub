@@ -24,11 +24,13 @@ python run.py
 # Docker 启动
 docker-compose up --build
 
-# 手动运行爬虫（爬取今天数据）
-python crawl.py
+# 手动运行顽主杯爬虫
+python crawl.py              # 今天
+python crawl.py 2026-04-30   # 指定日期
 
-# 手动运行爬虫（爬取指定日期）
-python crawl.py 2026-04-30
+# 手动运行龙虎榜爬虫
+python crawl_lhb.py              # 今天
+python crawl_lhb.py 2026-04-30   # 指定日期
 
 # Linux 安装 cron 定时任务（每天 20:00 自动爬取）
 bash setup_crawler_cron.sh        # 安装
@@ -53,26 +55,32 @@ pytest -v  # 详细输出
 
 `cron 20:00` → `crawl.py` → `顽主杯 API`（股票热榜 + 收益数据） → `upsert_records` → `SQLite`
 
+龙虎榜爬取流程：
+
+`crawl_lhb.py` → `东方财富 API`（龙虎榜汇总 + 营业部买卖明细） → 识别信号股 → `SQLite`
+
 ### Backend (FastAPI, Python)
 
 - **`backend/main.py`** — FastAPI 应用入口，所有 API 路由。模块级 `db` 实例，测试通过 `monkeypatch` 替换。静态文件服务优先从 `frontend/dist/`（构建产物），fallback 到 `frontend/`（开发模式）。
 - **`backend/ocr.py`** — 核心解析逻辑。`ocr_image()` 调百度 OCR API（httpx 同步）；`parse_ocr_text()` 用"中文名+热度值(w)"锚点定位，不依赖排名数字。`KNOWN_SECTORS` 硬编码板块关键词列表。
 - **`backend/crawler.py`** — 顽主杯数据爬虫。从 `api.hunanwanzhu.com` 爬取股票热榜和收益数据，映射到数据库字段后写入。`is_trade_day()` 含 2026 年节假日/调休日历。使用 `upsert_records` 支持重复执行。
-- **`backend/database.py`** — SQLite 封装，三张表：`stock_records`（主数据，`UNIQUE(date, stock_code)`，含 `total_fund` 字段）、`season_daily_stats`（赛季每日盈亏，`ON CONFLICT DO UPDATE`）、`seasons`（命名时间范围）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。空库时自动创建默认赛季。
-- **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（14 字段含 `total_fund`，stock_code 必须正好 6 位数字）、`StockRecordResponse`（含 id/created_at）、`UploadResult`、`DateInfo`。
+- **`backend/lhb_crawler.py`** — 东方财富龙虎榜爬虫。从 `datacenter-web.eastmoney.com` 抓取龙虎榜日汇总和营业部买卖明细，识别境外机构/机构密集信号股，获取个股概念板块标签。
+- **`backend/database.py`** — SQLite 封装。表：`stock_records`（主数据）、`season_daily_stats`（赛季每日盈亏）、`seasons`（命名时间范围）、`lhb_records`（龙虎榜日汇总）、`lhb_trading_desk`（营业部买卖明细）、`lhb_signals`（信号股）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。
+- **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（14 字段含 `total_fund`）、`StockRecordResponse`、`UploadResult`、`DateInfo`。
 - **`backend/config.py`** — `pydantic-settings` 从 `.env` 加载，路径默认相对于项目根目录。
-- **`crawl.py`** — 爬虫入口脚本（cron 调用），支持 `python crawl.py [YYYY-MM-DD]`。日志输出到 `data/crawler.log`。
-- **`setup_crawler_cron.sh`** — Linux cron 安装/卸载脚本，每天 20:00 触发爬虫。
+- **`crawl.py`** — 顽主杯爬虫入口脚本，支持 `python crawl.py [YYYY-MM-DD]`。
+- **`crawl_lhb.py`** — 龙虎榜爬虫入口脚本，用法同 `crawl.py`。
+- **`setup_crawler_cron.sh`** — Linux cron 安装/卸载脚本，每天 20:00 触发顽主杯爬虫。
 
 ### Frontend (Vue 3 + TypeScript + Vite)
 
 `frontend_legacy/` 保留了旧版 vanilla JS 前端作为备份，当前使用 `frontend/` 目录。
 
 - **路由**：`/preview`（只读）和 `/admin`（含上传功能），通过 Vue Router meta + provide/inject 传递 `isAdmin`。
-- **三个主视图**：`DailyView`（日报 Top10 卡片 + 涨跌幅/持价新增图表）、`PnlView`（赛季盈亏走势 + 仓位百分比，admin 可手动录入）、`RangeView`（跨日分析：板块热力图、个股频率、热度趋势、持仓趋势、综合热力网格）。
-- **组件**：`StockCard`（排名徽章，涨红跌绿）、`UploadArea`（拖拽上传）、`ConfirmModal`（OCR 结果可编辑表格）、`ChartBox`（通用 ECharts 容器）、`TimeFilter`、`EmptyState`。
-- **Composables**：`useApi`（类型化 fetch）、`useChart`（ECharts 生命周期：init/setOption/resize/dispose）。
-- **Charts**（`frontend/src/charts/`）：四个图表模块，共享暗色主题（`theme.ts`），自定义调色板和 tooltip 样式。
+- **视图**：`DailyView`（日报 Top10 卡片 + 近5日对比表格 + 趋势折线图）、`PnlView`（赛季盈亏走势 + 仓位百分比）、`RangeView`（跨日分析）、`LhbView`（龙虎榜信号股 + 板块分析）。
+- **组件**：`StockCard`、`UploadArea`、`ConfirmModal`、`ChartBox`、`TimeFilter`、`EmptyState`。
+- **Composables**：`useApi`（类型化 fetch）、`useChart`（ECharts 生命周期）。
+- **Charts**（`frontend/src/charts/`）：图表模块，共享暗色主题（`theme.ts`）。
 - **CSS**：暗色主题 + 玻璃态导航栏，金银铜排名徽章，红涨绿跌（中国市场惯例），响应式断点 900px/600px。
 
 ### Key Design Decisions
@@ -80,9 +88,22 @@ pytest -v  # 详细输出
 - **OCR 锚点模式**：百度 OCR 经常漏识别排名数字，所以用"股票名+热度值"锚点定位，排名按锚点出现顺序推算。
 - **两步保存**：上传返回识别结果供前端编辑确认，确认后才写入数据库，保证 OCR 数据准确性。
 - **SQLite 零配置**：`data/stock.db` 自动创建，无 ORM，原生参数化 SQL。schema 迁移靠 `_init_db()` 里的 `ALTER TABLE`。
-- **数据双入口**：OCR 手动上传和 API 自动爬取都可以写入数据，`upsert_records` 处理冲突（新字段 COALESCE 保留旧值，空字符串 price_action 不覆盖）。
+- **数据双入口**：OCR 手动上传和 API 自动爬取都可以写入数据，`upsert_records` 处理冲突。
 - **Admin vs Preview 角色**：纯 URL 路径区分，无认证。`/admin` 可上传和录入数据，`/preview` 只读。
 - **红涨绿跌**：中国市场惯例，CSS 和图表配色一致使用。
+
+## 龙虎榜信号股规则
+
+### 境外机构（第一梯队）
+识别以下5家营业部的买卖操作：
+- 国泰海通证券总部
+- 中信证券上海分公司
+- 瑞银证券上海花园石桥路
+- 摩根大通证券（中国）上海银城中路
+- 高盛（中国）证券上海浦东新区世纪大道
+
+### 机构密集
+买方+卖方共10个席位中，6个及以上为"机构专用"席位。
 
 ## Environment Variables
 
@@ -121,3 +142,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 | POST/GET | `/api/season-stats` | 赛季每日盈亏数据（批量保存 / 按范围查询） |
 | GET | `/api/season-stats/dates` | 赛季数据所有日期列表 |
 | GET/POST/PUT | `/api/seasons` | 赛季 CRUD（列表 / 创建 / 更新） |
+| POST | `/api/crawl` | 手动触发顽主杯爬虫 |
+| POST | `/api/crawl-lhb` | 手动触发龙虎榜爬虫 |
+| GET | `/api/lhb/signals?date=` | 查询龙虎榜信号股（境外机构/机构密集） |
+| GET | `/api/lhb/analysis?months=3` | 龙虎榜板块分析（按月统计） |
