@@ -60,7 +60,7 @@ def fetch_lhb_data(date_str: str) -> list[dict]:
         logger.warning("龙虎榜数据返回异常 %s: %s", date_str, body.get("message"))
         return []
 
-    rows = body.get("result", {}).get("data", [])
+    rows = (body.get("result") or {}).get("data", [])
     if not rows:
         return []
 
@@ -116,7 +116,8 @@ def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) 
             logger.warning("营业部明细请求失败 %s %s %s: %s", date_str, stock_code, side, e)
             continue
 
-        for item in body.get("result", {}).get("data", []):
+        result = body.get("result") or {}
+        for item in result.get("data", []):
             records.append({
                 "date": date_str,
                 "stock_code": stock_code,
