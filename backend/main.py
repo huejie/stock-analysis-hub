@@ -288,6 +288,12 @@ async def get_lhb_signal_dates():
     return {"dates": db.get_lhb_signal_dates()}
 
 
+@app.get("/api/lhb/trading-desk")
+async def get_lhb_trading_desk(date: str, stock_code: str):
+    """查询指定股票在指定日期的买卖营业部明细。"""
+    return db.query_lhb_trading_desk(date, stock_code)
+
+
 @app.get("/api/lhb/analysis")
 async def lhb_analysis(months: int = 3):
     """龙虎榜近 N 个月板块分析。返回概念板块出现频率和平均涨跌幅。"""

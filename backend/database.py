@@ -392,3 +392,11 @@ class Database:
                 "SELECT DISTINCT date FROM lhb_signals ORDER BY date DESC"
             ).fetchall()
             return [r["date"] for r in rows]
+
+    def query_lhb_trading_desk(self, date: str, stock_code: str) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM lhb_trading_desk WHERE date = ? AND stock_code = ? ORDER BY side, net_amt DESC",
+                (date, stock_code),
+            ).fetchall()
+            return [dict(r) for r in rows]

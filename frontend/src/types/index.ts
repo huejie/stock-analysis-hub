@@ -60,3 +60,14 @@ export interface LhbAnalysis {
   sector_distribution: { sector: string; count: number; avg_change: number | null }[]
   signal_type_stats: Record<string, { count: number; total_net: number }>
 }
+
+export interface LhbTradingDesk {
+  date: string
+  stock_code: string
+  stock_name: string
+  side: 'buy' | 'sell'
+  dept_name: string
+  buy_amt: number | null
+  sell_amt: number | null
+  net_amt: number | null
+}

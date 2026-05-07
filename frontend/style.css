@@ -930,6 +930,61 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
     background: rgba(16, 185, 129, 0.1);
     border: 1px solid rgba(16, 185, 129, 0.3);
 }
+.lhb-desk-row td {
+    padding: 0 !important;
+    border-top: none;
+}
+.lhb-desk-cell {
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--border);
+}
+.lhb-desk-wrap {
+    display: flex;
+    gap: 0;
+    padding: 12px 16px;
+}
+.lhb-desk-side {
+    flex: 1;
+    min-width: 0;
+}
+.lhb-desk-side + .lhb-desk-side {
+    border-left: 1px solid var(--border);
+    padding-left: 16px;
+}
+.lhb-desk-title {
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+.lhb-buy-title { color: var(--red); }
+.lhb-sell-title { color: var(--green); }
+.lhb-desk-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 0;
+    font-size: 12px;
+}
+.lhb-desk-name {
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 65%;
+}
+.lhb-desk-amt {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    flex-shrink: 0;
+}
+.lhb-desk-empty {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 4px 0;
+}
 
 /* ===== Responsive ===== */
 @media (max-width: 900px) {

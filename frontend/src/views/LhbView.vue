@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue'
-import type { LhbSignal, LhbAnalysis } from '../types'
+import type { LhbSignal, LhbAnalysis, LhbTradingDesk } from '../types'
 import { useApi } from '../composables/useApi'
 import { CHART_COLORS, CHART_BASE } from '../charts/theme'
 import ChartBox from '../components/ChartBox.vue'
@@ -18,6 +18,9 @@ const toastMsg = ref('')
 const toastVisible = ref(false)
 const analysisMonths = ref(3)
 const sectorChartRef = ref()
+
+const expandedCode = ref<string | null>(null)
+const deskMap = ref<Map<string, LhbTradingDesk[]>>(new Map())
 
 const foreignSignals = computed(() => signals.value.filter(s => s.signal_type === 'foreign'))
 const instDenseSignals = computed(() => signals.value.filter(s => s.signal_type === 'inst_dense'))
@@ -45,6 +48,30 @@ function changeClass(val: number | null): string {
   return val >= 0 ? 'ct-up' : 'ct-down'
 }
 
+async function toggleExpand(code: string) {
+  if (expandedCode.value === code) {
+    expandedCode.value = null
+    return
+  }
+  expandedCode.value = code
+  if (!deskMap.value.has(code) && selectedDate.value) {
+    try {
+      const desks = await api.fetchLhbTradingDesk(selectedDate.value, code)
+      deskMap.value = new Map(deskMap.value).set(code, desks)
+    } catch {
+      deskMap.value = new Map(deskMap.value).set(code, [])
+    }
+  }
+}
+
+function getBuyDesks(code: string) {
+  return (deskMap.value.get(code) || []).filter(d => d.side === 'buy')
+}
+
+function getSellDesks(code: string) {
+  return (deskMap.value.get(code) || []).filter(d => d.side === 'sell')
+}
+
 async function loadDates() {
   const res = await api.fetchLhbSignalDates()
   signalDates.value = res.dates
@@ -56,6 +83,8 @@ async function loadDates() {
 async function loadSignals() {
   if (!selectedDate.value) return
   loading.value = true
+  expandedCode.value = null
+  deskMap.value = new Map()
   try {
     signals.value = await api.fetchLhbSignals(selectedDate.value)
   } catch {
@@ -182,21 +211,46 @@ init()
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in foreignSignals" :key="s.stock_code">
-              <td class="lhb-col-name">
-                <span class="ct-name">{{ s.stock_name }}</span>
-                <span class="lhb-code">{{ s.stock_code }}</span>
-              </td>
-              <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
-              <td>{{ fmtAmt(s.buy_amt) }}</td>
-              <td>{{ fmtAmt(s.sell_amt) }}</td>
-              <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
-                {{ fmtAmt(s.net_amt) }}
-              </td>
-              <td class="lhb-col-tags">
-                <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
-              </td>
-            </tr>
+            <template v-for="s in foreignSignals" :key="s.stock_code">
+              <tr class="ct-clickable" :class="{ 'ct-selected': expandedCode === s.stock_code }" @click="toggleExpand(s.stock_code)">
+                <td class="lhb-col-name">
+                  <span class="ct-name">{{ s.stock_name }}</span>
+                  <span class="lhb-code">{{ s.stock_code }}</span>
+                </td>
+                <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
+                <td>{{ fmtAmt(s.buy_amt) }}</td>
+                <td>{{ fmtAmt(s.sell_amt) }}</td>
+                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
+                  {{ fmtAmt(s.net_amt) }}
+                </td>
+                <td class="lhb-col-tags">
+                  <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                </td>
+              </tr>
+              <!-- 展开的营业部明细 -->
+              <tr v-if="expandedCode === s.stock_code" class="lhb-desk-row">
+                <td colspan="6" class="lhb-desk-cell">
+                  <div class="lhb-desk-wrap">
+                    <div class="lhb-desk-side">
+                      <div class="lhb-desk-title lhb-buy-title">买入营业部</div>
+                      <div v-for="d in getBuyDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                        <span class="lhb-desk-name">{{ d.dept_name }}</span>
+                        <span class="lhb-desk-amt">{{ fmtAmt(d.buy_amt) }}</span>
+                      </div>
+                      <div v-if="getBuyDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                    </div>
+                    <div class="lhb-desk-side">
+                      <div class="lhb-desk-title lhb-sell-title">卖出营业部</div>
+                      <div v-for="d in getSellDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                        <span class="lhb-desk-name">{{ d.dept_name }}</span>
+                        <span class="lhb-desk-amt">{{ fmtAmt(d.sell_amt) }}</span>
+                      </div>
+                      <div v-if="getSellDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -221,22 +275,47 @@ init()
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in instDenseSignals" :key="s.stock_code">
-              <td class="lhb-col-name">
-                <span class="ct-name">{{ s.stock_name }}</span>
-                <span class="lhb-code">{{ s.stock_code }}</span>
-              </td>
-              <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
-              <td class="lhb-inst-count">{{ s.inst_count }}席</td>
-              <td>{{ fmtAmt(s.buy_amt) }}</td>
-              <td>{{ fmtAmt(s.sell_amt) }}</td>
-              <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
-                {{ fmtAmt(s.net_amt) }}
-              </td>
-              <td class="lhb-col-tags">
-                <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
-              </td>
-            </tr>
+            <template v-for="s in instDenseSignals" :key="s.stock_code">
+              <tr class="ct-clickable" :class="{ 'ct-selected': expandedCode === s.stock_code }" @click="toggleExpand(s.stock_code)">
+                <td class="lhb-col-name">
+                  <span class="ct-name">{{ s.stock_name }}</span>
+                  <span class="lhb-code">{{ s.stock_code }}</span>
+                </td>
+                <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
+                <td class="lhb-inst-count">{{ s.inst_count }}席</td>
+                <td>{{ fmtAmt(s.buy_amt) }}</td>
+                <td>{{ fmtAmt(s.sell_amt) }}</td>
+                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
+                  {{ fmtAmt(s.net_amt) }}
+                </td>
+                <td class="lhb-col-tags">
+                  <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                </td>
+              </tr>
+              <!-- 展开的营业部明细 -->
+              <tr v-if="expandedCode === s.stock_code" class="lhb-desk-row">
+                <td colspan="7" class="lhb-desk-cell">
+                  <div class="lhb-desk-wrap">
+                    <div class="lhb-desk-side">
+                      <div class="lhb-desk-title lhb-buy-title">买入营业部</div>
+                      <div v-for="d in getBuyDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                        <span class="lhb-desk-name">{{ d.dept_name }}</span>
+                        <span class="lhb-desk-amt">{{ fmtAmt(d.buy_amt) }}</span>
+                      </div>
+                      <div v-if="getBuyDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                    </div>
+                    <div class="lhb-desk-side">
+                      <div class="lhb-desk-title lhb-sell-title">卖出营业部</div>
+                      <div v-for="d in getSellDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                        <span class="lhb-desk-name">{{ d.dept_name }}</span>
+                        <span class="lhb-desk-amt">{{ fmtAmt(d.sell_amt) }}</span>
+                      </div>
+                      <div v-if="getSellDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>

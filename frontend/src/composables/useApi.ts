@@ -5,6 +5,7 @@ import type {
   SaveResponse,
   LhbSignal,
   LhbAnalysis,
+  LhbTradingDesk,
 } from '../types'
 
 async function request<T>(urlOrInit: string | (RequestInit & { url: string })): Promise<T> {
@@ -70,5 +71,8 @@ export function useApi() {
       const params = targetDate ? `?date=${targetDate}` : ''
       return request<{ status: string; message: string }>({ url: `/api/crawl-lhb${params}`, method: 'POST' })
     },
+
+    fetchLhbTradingDesk: (date: string, stockCode: string) =>
+      request<LhbTradingDesk[]>(`/api/lhb/trading-desk?date=${date}&stock_code=${stockCode}`),
   }
 }
