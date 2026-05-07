@@ -216,6 +216,7 @@ init()
                 <td class="lhb-col-name">
                   <span class="ct-name">{{ s.stock_name }}</span>
                   <span class="lhb-code">{{ s.stock_code }}</span>
+                  <button class="lhb-expand-btn" :class="{ active: expandedCode === s.stock_code }" title="查看营业部明细">&#9654;</button>
                 </td>
                 <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
                 <td>{{ fmtAmt(s.buy_amt) }}</td>
@@ -280,6 +281,7 @@ init()
                 <td class="lhb-col-name">
                   <span class="ct-name">{{ s.stock_name }}</span>
                   <span class="lhb-code">{{ s.stock_code }}</span>
+                  <button class="lhb-expand-btn" :class="{ active: expandedCode === s.stock_code }" title="查看营业部明细">&#9654;</button>
                 </td>
                 <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
                 <td class="lhb-inst-count">{{ s.inst_count }}席</td>
