@@ -16,12 +16,13 @@ HEADERS = {
     "Referer": "https://data.eastmoney.com/",
 }
 
-# 境外机构营业部名称关键词
+# 境外机构营业部名称关键词（实际名称含"股份有限公司"等，关键词需足够短才能匹配）
 FOREIGN_INSTITUTIONS = [
-    "国泰海通证券总部",
-    "中信证券上海分公司",
-    "瑞银证券上海花园石桥路",
+    "国泰海通证券股份有限公司总部",
+    "中信证券股份有限公司上海分公司",
+    "瑞银证券有限责任公司上海花园石桥路",
     "摩根大通证券",
+    "高盛(中国)证券",
     "高盛（中国）证券",
 ]
 
@@ -210,17 +211,23 @@ def identify_signals(date_str: str, summary_records: list[dict],
                     "concept_tags": None,
                 })
 
-        # 2. 机构密集信号（去重：买卖各取唯一营业部）
-        unique_seats = set()
-        for d in desks:
-            unique_seats.add(d["dept_name"])
-        inst_count = sum(1 for name in unique_seats if is_institutional_seat(name))
+        # 2. 机构密集信号（龙虎榜标准：买方前5 + 卖方前5 = 10席）
+        top_buy = sorted(
+            [d for d in desks if d["side"] == "buy"],
+            key=lambda d: d.get("buy_amt") or 0, reverse=True,
+        )[:5]
+        top_sell = sorted(
+            [d for d in desks if d["side"] == "sell"],
+            key=lambda d: d.get("sell_amt") or 0, reverse=True,
+        )[:5]
+        top10 = top_buy + top_sell
+        inst_count = sum(1 for d in top10 if is_institutional_seat(d["dept_name"]))
 
         if inst_count >= INST_THRESHOLD:
             key = (code, "inst_dense")
             if key not in processed:
                 processed.add(key)
-                inst_depts = [d for d in desks if is_institutional_seat(d["dept_name"])]
+                inst_depts = [d for d in top10 if is_institutional_seat(d["dept_name"])]
                 buy = sum(d.get("buy_amt") or 0 for d in inst_depts)
                 sell = sum(d.get("sell_amt") or 0 for d in inst_depts)
                 signals.append({

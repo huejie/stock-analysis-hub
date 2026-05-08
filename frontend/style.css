@@ -866,6 +866,32 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
     outline: none;
     border-color: var(--accent);
 }
+.lhb-date-input {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+}
+.lhb-date-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.lhb-date-input::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+}
+.lhb-divider {
+    color: var(--text-muted);
+    opacity: 0.3;
+    margin: 0 4px;
+}
+.lhb-sep {
+    color: var(--text-muted);
+    margin: 0 2px;
+}
 .lhb-loading {
     text-align: center;
     padding: 40px;

@@ -72,6 +72,9 @@ export function useApi() {
       return request<{ status: string; message: string }>({ url: `/api/crawl-lhb${params}`, method: 'POST' })
     },
 
+    crawlLhbBatch: (startDate: string, endDate: string) =>
+      request<{ status: string; message: string; days: number }>({ url: `/api/crawl-lhb-batch?start_date=${startDate}&end_date=${endDate}`, method: 'POST' }),
+
     fetchLhbTradingDesk: (date: string, stockCode: string) =>
       request<LhbTradingDesk[]>(`/api/lhb/trading-desk?date=${date}&stock_code=${stockCode}`),
   }

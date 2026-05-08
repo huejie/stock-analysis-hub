@@ -254,11 +254,12 @@ async def update_season(season_id: int, data: dict):
 # ---- 龙虎榜 ----
 
 @app.post("/api/crawl-lhb")
-async def crawl_lhb_today(target_date: str | None = None):
+async def crawl_lhb_today(date: str | None = None):
     """手动触发龙虎榜爬虫。可选 ?date=YYYY-MM-DD 指定日期。"""
     import asyncio
     try:
-        td = date.fromisoformat(target_date) if target_date else None
+        from datetime import date as date_cls
+        td = date_cls.fromisoformat(date) if date else None
         result = await asyncio.to_thread(crawl_lhb, db, td)
         return {
             "status": "ok",
@@ -267,6 +268,39 @@ async def crawl_lhb_today(target_date: str | None = None):
         }
     except Exception as e:
         raise HTTPException(500, f"龙虎榜爬取失败: {str(e)}")
+
+
+@app.post("/api/crawl-lhb-batch")
+async def crawl_lhb_batch(start_date: str, end_date: str):
+    """批量抓取龙虎榜。?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"""
+    import asyncio
+    from datetime import date as date_cls, timedelta
+    try:
+        start = date_cls.fromisoformat(start_date)
+        end = date_cls.fromisoformat(end_date)
+        if start > end:
+            start, end = end, start
+    except (ValueError, TypeError):
+        raise HTTPException(400, "日期格式错误，请使用 YYYY-MM-DD")
+
+    results = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:  # 跳过周末
+            result = await asyncio.to_thread(crawl_lhb, db, current)
+            results.append(result)
+        current += timedelta(days=1)
+
+    total_summary = sum(r["summary_count"] for r in results)
+    total_signals = sum(r["signal_count"] for r in results)
+    return {
+        "status": "ok",
+        "message": f"批量抓取完成：{len(results)}个交易日，汇总 {total_summary} 条，信号股 {total_signals} 只",
+        "days": len(results),
+        "total_summary": total_summary,
+        "total_signals": total_signals,
+        "details": results,
+    }
 
 
 @app.get("/api/lhb/signals")

@@ -14,6 +14,8 @@ const signals = ref<LhbSignal[]>([])
 const analysis = ref<LhbAnalysis | null>(null)
 const loading = ref(false)
 const crawling = ref(false)
+const crawlStart = ref('')
+const crawlEnd = ref('')
 const toastMsg = ref('')
 const toastVisible = ref(false)
 const analysisMonths = ref(3)
@@ -33,8 +35,9 @@ function showToast(msg: string) {
 
 function fmtAmt(val: number | null): string {
   if (val == null) return '-'
-  if (Math.abs(val) >= 10000) return (val / 10000).toFixed(2) + '亿'
-  return val.toFixed(0) + '万'
+  if (Math.abs(val) >= 1e8) return (val / 1e8).toFixed(2) + '亿'
+  if (Math.abs(val) >= 1e4) return (val / 1e4).toFixed(2) + '万'
+  return val.toFixed(0) + '元'
 }
 
 function fmtChange(val: number | null): string {
@@ -98,20 +101,31 @@ async function loadAnalysis() {
     analysis.value = await api.fetchLhbAnalysis(analysisMonths.value)
     await nextTick()
     renderSectorChart()
-  } catch {
+  } catch (e) {
+    console.error('板块分析加载失败:', e)
     analysis.value = null
   }
 }
 
-async function handleCrawlLhb() {
+async function handleCrawl() {
+  if (!crawlStart.value) {
+    showToast('请选择开始日期')
+    return
+  }
+  const end = crawlEnd.value || crawlStart.value
   crawling.value = true
   try {
-    const res = await api.crawlLhb()
+    const res = await api.crawlLhbBatch(crawlStart.value, end)
     showToast(res.message)
     await loadDates()
-    if (selectedDate.value) await loadSignals()
+    // 切到抓取范围内最新日期
+    const target = signalDates.value.find(d => d <= end) || signalDates.value[0] || ''
+    if (target) {
+      selectedDate.value = target
+      await loadSignals()
+    }
   } catch (e: unknown) {
-    showToast('爬取失败: ' + (e instanceof Error ? e.message : String(e)))
+    showToast('抓取失败: ' + (e instanceof Error ? e.message : String(e)))
   } finally {
     crawling.value = false
   }
@@ -120,10 +134,8 @@ async function handleCrawlLhb() {
 function renderSectorChart() {
   if (!sectorChartRef.value || !analysis.value) return
   const data = analysis.value.sector_distribution.slice(0, 15)
-  const chart = sectorChartRef.value.getChart()
-  if (!chart) return
 
-  chart.setOption({
+  sectorChartRef.value.setOption({
     ...CHART_BASE,
     tooltip: {
       trigger: 'axis',
@@ -178,9 +190,13 @@ init()
   <div>
     <div class="lhb-header">
       <div class="lhb-controls">
-        <button class="btn btn-primary" :disabled="crawling" @click="handleCrawlLhb">
-          {{ crawling ? '抓取中...' : '抓取龙虎榜' }}
+        <input type="date" v-model="crawlStart" class="lhb-date-input" />
+        <span class="lhb-sep">~</span>
+        <input type="date" v-model="crawlEnd" class="lhb-date-input" placeholder="可选" />
+        <button class="btn btn-primary" :disabled="crawling" @click="handleCrawl">
+          {{ crawling ? '抓取中...' : '抓取' }}
         </button>
+        <span class="lhb-divider">|</span>
         <select v-model="selectedDate" class="lhb-select" @change="loadSignals">
           <option value="">选择日期</option>
           <option v-for="d in signalDates" :key="d" :value="d">{{ d }}</option>
