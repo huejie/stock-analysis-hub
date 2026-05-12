@@ -288,8 +288,11 @@ def crawl_lhb(db: Database | None = None, target_date: date | None = None) -> di
         except Exception as e:
             logger.error("营业部明细入库失败: %s", e)
 
-    # 3. 识别信号股
-    signals = identify_signals(target_str, summary_records, all_desk_records)
+    # 3. 识别信号股（排除 ST 股票）
+    non_st_stocks = {r["stock_code"] for r in summary_records if "ST" not in r["stock_name"].upper()}
+    filtered_desks = [d for d in all_desk_records if d["stock_code"] in non_st_stocks]
+    filtered_summary = [r for r in summary_records if r["stock_code"] in non_st_stocks]
+    signals = identify_signals(target_str, filtered_summary, filtered_desks)
     logger.info("识别信号股: %d 只（境外机构=%d, 机构密集=%d）",
                 len(signals),
                 sum(1 for s in signals if s["signal_type"] == "foreign"),
