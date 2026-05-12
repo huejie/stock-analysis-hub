@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
-import type { LhbSignal, LhbAnalysis, LhbTradingDesk } from '../types'
+import { ref, computed, nextTick, watch } from 'vue'
+import type { LhbSignal, LhbAnalysis, LhbTradingDesk, LhbPoolItem } from '../types'
 import { useApi } from '../composables/useApi'
 import { CHART_COLORS, CHART_BASE } from '../charts/theme'
 import ChartBox from '../components/ChartBox.vue'
 import * as echarts from 'echarts'
 
 const api = useApi()
+
+type LhbTab = 'foreign' | 'inst_dense' | 'analysis' | 'pool'
+const activeTab = ref<LhbTab>('foreign')
 
 const signalDates = ref<string[]>([])
 const selectedDate = ref('')
@@ -20,6 +23,14 @@ const toastMsg = ref('')
 const toastVisible = ref(false)
 const analysisMonths = ref(3)
 const sectorChartRef = ref()
+
+const poolData = ref<LhbPoolItem[]>([])
+const poolLoading = ref(false)
+const poolUpdating = ref(false)
+const poolFilter = ref<'all' | 'foreign' | 'inst_dense'>('all')
+const poolSearch = ref('')
+const poolSortKey = ref<string>('signal_date')
+const poolSortAsc = ref(false)
 
 const expandedCode = ref<string | null>(null)
 const deskMap = ref<Map<string, LhbTradingDesk[]>>(new Map())
@@ -118,7 +129,6 @@ async function handleCrawl() {
     const res = await api.crawlLhbBatch(crawlStart.value, end)
     showToast(res.message)
     await loadDates()
-    // 切到抓取范围内最新日期
     const target = signalDates.value.find(d => d <= end) || signalDates.value[0] || ''
     if (target) {
       selectedDate.value = target
@@ -177,11 +187,108 @@ function renderSectorChart() {
   })
 }
 
+// ---- 股池 ----
+
+function currentChange(p: LhbPoolItem): number | null {
+  if (p.entry_price && p.latest_price) {
+    return (p.latest_price - p.entry_price) / p.entry_price * 100
+  }
+  return null
+}
+
+const filteredPool = computed(() => {
+  let list = poolData.value
+  if (poolFilter.value !== 'all') {
+    list = list.filter(p => p.signal_types.includes(poolFilter.value))
+  }
+  if (poolSearch.value.trim()) {
+    const q = poolSearch.value.trim().toLowerCase()
+    list = list.filter(p =>
+      p.stock_name.toLowerCase().includes(q) ||
+      p.stock_code.includes(q)
+    )
+  }
+  const key = poolSortKey.value
+  const dir = poolSortAsc.value ? 1 : -1
+  return [...list].sort((a, b) => {
+    let va: number | string
+    let vb: number | string
+    if (key === 'current_change') {
+      va = currentChange(a) ?? -Infinity
+      vb = currentChange(b) ?? -Infinity
+    } else {
+      const k = key as keyof LhbPoolItem
+      va = (a[k] ?? '') as number | string
+      vb = (b[k] ?? '') as number | string
+    }
+    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
+    return String(va).localeCompare(String(vb)) * dir
+  })
+})
+
+function toggleSort(key: string) {
+  if (poolSortKey.value === key) {
+    poolSortAsc.value = !poolSortAsc.value
+  } else {
+    poolSortKey.value = key
+    poolSortAsc.value = key === 'signal_date'
+  }
+}
+
+function sortIndicator(key: string): string {
+  if (poolSortKey.value !== key) return ''
+  return poolSortAsc.value ? ' ↑' : ' ↓'
+}
+
+async function loadPool() {
+  poolLoading.value = true
+  try {
+    poolData.value = await api.fetchLhbPool()
+  } catch {
+    poolData.value = []
+  }
+  poolLoading.value = false
+}
+
+async function handleUpdatePool() {
+  poolUpdating.value = true
+  try {
+    const res = await api.updateLhbPool()
+    showToast(res.message)
+    await loadPool()
+  } catch (e: unknown) {
+    showToast('更新失败: ' + (e instanceof Error ? e.message : String(e)))
+  } finally {
+    poolUpdating.value = false
+  }
+}
+
+function signalTypeLabel(types: string): string {
+  const parts = types.split(',')
+  const labels: string[] = []
+  if (parts.includes('foreign')) labels.push('境外')
+  if (parts.includes('inst_dense')) labels.push('密集')
+  return labels.join('+')
+}
+
+function signalTypeClass(types: string): string {
+  if (types.includes('foreign') && types.includes('inst_dense')) return 'lhb-tag-both'
+  if (types.includes('foreign')) return 'lhb-tag-foreign'
+  return 'lhb-tag-inst'
+}
+
 async function init() {
   await loadDates()
   if (selectedDate.value) await loadSignals()
   await loadAnalysis()
+  await loadPool()
 }
+
+watch(activeTab, (tab) => {
+  if (tab === 'analysis') {
+    nextTick(() => renderSectorChart())
+  }
+})
 
 init()
 </script>
@@ -192,7 +299,7 @@ init()
       <div class="lhb-controls">
         <input type="date" v-model="crawlStart" class="lhb-date-input" />
         <span class="lhb-sep">~</span>
-        <input type="date" v-model="crawlEnd" class="lhb-date-input" placeholder="可选" />
+        <input type="date" v-model="crawlEnd" class="lhb-date-input" />
         <button class="btn btn-primary" :disabled="crawling" @click="handleCrawl">
           {{ crawling ? '抓取中...' : '抓取' }}
         </button>
@@ -205,14 +312,29 @@ init()
       <div v-if="toastVisible" class="toast-inline">{{ toastMsg }}</div>
     </div>
 
+    <!-- 子 Tab 切换 -->
+    <div class="lhb-tabs">
+      <button
+        v-for="t in ([
+          { key: 'foreign', label: '境外机构', count: foreignSignals.length },
+          { key: 'inst_dense', label: '机构密集', count: instDenseSignals.length },
+          { key: 'analysis', label: '板块分析', count: null },
+          { key: 'pool', label: '股池', count: filteredPool.length },
+        ] as const)"
+        :key="t.key"
+        class="lhb-tab"
+        :class="{ active: activeTab === t.key }"
+        @click="activeTab = t.key"
+      >
+        {{ t.label }}
+        <span v-if="t.count !== null" class="lhb-tab-count">{{ t.count }}</span>
+      </button>
+    </div>
+
     <div v-if="loading" class="lhb-loading">加载中...</div>
 
-    <template v-if="!loading && selectedDate">
-      <!-- 境外机构信号 -->
-      <div class="section-title">
-        <span class="section-icon">&#9733;</span> 境外机构买入
-        <span class="ct-hint">共 {{ foreignSignals.length }} 只</span>
-      </div>
+    <!-- 境外机构 -->
+    <template v-if="!loading && activeTab === 'foreign' && selectedDate">
       <div v-if="foreignSignals.length === 0" class="lhb-empty">当日无境外机构信号</div>
       <div v-else class="lhb-table-wrap">
         <table class="compare-table">
@@ -237,14 +359,11 @@ init()
                 <td :class="changeClass(s.change_rate)">{{ fmtChange(s.change_rate) }}</td>
                 <td>{{ fmtAmt(s.buy_amt) }}</td>
                 <td>{{ fmtAmt(s.sell_amt) }}</td>
-                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
-                  {{ fmtAmt(s.net_amt) }}
-                </td>
+                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">{{ fmtAmt(s.net_amt) }}</td>
                 <td class="lhb-col-tags">
                   <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
                 </td>
               </tr>
-              <!-- 展开的营业部明细 -->
               <tr v-if="expandedCode === s.stock_code" class="lhb-desk-row">
                 <td colspan="6" class="lhb-desk-cell">
                   <div class="lhb-desk-wrap">
@@ -271,12 +390,10 @@ init()
           </tbody>
         </table>
       </div>
+    </template>
 
-      <!-- 机构密集信号 -->
-      <div class="section-title lhb-section-gap">
-        <span class="section-icon">&#9632;</span> 机构密集（≥6席）
-        <span class="ct-hint">共 {{ instDenseSignals.length }} 只</span>
-      </div>
+    <!-- 机构密集 -->
+    <template v-if="!loading && activeTab === 'inst_dense' && selectedDate">
       <div v-if="instDenseSignals.length === 0" class="lhb-empty">当日无机构密集信号</div>
       <div v-else class="lhb-table-wrap">
         <table class="compare-table">
@@ -303,14 +420,11 @@ init()
                 <td class="lhb-inst-count">{{ s.inst_count }}席</td>
                 <td>{{ fmtAmt(s.buy_amt) }}</td>
                 <td>{{ fmtAmt(s.sell_amt) }}</td>
-                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">
-                  {{ fmtAmt(s.net_amt) }}
-                </td>
+                <td :class="(s.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'" class="lhb-bold">{{ fmtAmt(s.net_amt) }}</td>
                 <td class="lhb-col-tags">
                   <span v-for="tag in (s.concept_tags || []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
                 </td>
               </tr>
-              <!-- 展开的营业部明细 -->
               <tr v-if="expandedCode === s.stock_code" class="lhb-desk-row">
                 <td colspan="7" class="lhb-desk-cell">
                   <div class="lhb-desk-wrap">
@@ -340,17 +454,14 @@ init()
     </template>
 
     <!-- 板块分析 -->
-    <template v-if="analysis">
-      <div class="section-title lhb-section-gap">
-        <span class="section-icon">&#9670;</span> 板块分析（近{{ analysisMonths }}个月）
-        <span class="ct-hint">共 {{ analysis.total_signals }} 条信号</span>
-      </div>
+    <template v-if="activeTab === 'analysis' && analysis">
       <div class="lhb-analysis-controls">
         <select v-model="analysisMonths" class="lhb-select" @change="loadAnalysis">
           <option :value="1">近1个月</option>
           <option :value="3">近3个月</option>
           <option :value="6">近6个月</option>
         </select>
+        <span class="ct-hint">共 {{ analysis.total_signals }} 条信号</span>
       </div>
       <div class="charts-row">
         <ChartBox ref="sectorChartRef" title="概念板块出现频率 Top 15" />
@@ -372,6 +483,52 @@ init()
               <td class="ct-name">{{ item.sector }}</td>
               <td>{{ item.count }}</td>
               <td :class="changeClass(item.avg_change)">{{ fmtChange(item.avg_change) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- 龙虎榜股池 -->
+    <template v-if="activeTab === 'pool'">
+      <div class="lhb-analysis-controls">
+        <input v-model="poolSearch" class="lhb-search" placeholder="搜索股票名称/代码" />
+        <select v-model="poolFilter" class="lhb-select">
+          <option value="all">全部信号</option>
+          <option value="foreign">境外机构</option>
+          <option value="inst_dense">机构密集</option>
+        </select>
+        <button class="btn btn-outline btn-sm" :disabled="poolUpdating" @click="handleUpdatePool">
+          {{ poolUpdating ? '更新中...' : '更新数据' }}
+        </button>
+      </div>
+      <div v-if="poolLoading" class="lhb-loading">加载中...</div>
+      <div v-else-if="filteredPool.length === 0" class="lhb-empty">暂无股池数据</div>
+      <div v-else class="lhb-table-wrap">
+        <table class="compare-table lhb-pool-table">
+          <thead>
+            <tr>
+              <th class="lhb-sort-th" @click="toggleSort('stock_name')">股票{{ sortIndicator('stock_name') }}</th>
+              <th>信号</th>
+              <th class="lhb-sort-th" @click="toggleSort('signal_date')">入选日{{ sortIndicator('signal_date') }}</th>
+              <th class="lhb-sort-th" @click="toggleSort('entry_price')">入选价{{ sortIndicator('entry_price') }}</th>
+              <th class="lhb-sort-th" @click="toggleSort('latest_price')">当前价{{ sortIndicator('latest_price') }}</th>
+              <th class="lhb-sort-th" @click="toggleSort('current_change')">当前涨幅{{ sortIndicator('current_change') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in filteredPool" :key="p.stock_code">
+              <td class="lhb-col-name">
+                <span class="ct-name">{{ p.stock_name }}</span>
+                <span class="lhb-code">{{ p.stock_code }}</span>
+              </td>
+              <td class="lhb-signal-tag" :class="signalTypeClass(p.signal_types)">
+                {{ signalTypeLabel(p.signal_types) }}
+              </td>
+              <td>{{ p.signal_date }}</td>
+              <td class="lhb-mono">{{ p.entry_price?.toFixed(2) ?? '-' }}</td>
+              <td class="lhb-mono">{{ p.latest_price?.toFixed(2) ?? '-' }}</td>
+              <td :class="changeClass(currentChange(p))" class="lhb-bold">{{ fmtChange(currentChange(p)) }}</td>
             </tr>
           </tbody>
         </table>

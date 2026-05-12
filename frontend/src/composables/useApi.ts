@@ -6,6 +6,7 @@ import type {
   LhbSignal,
   LhbAnalysis,
   LhbTradingDesk,
+  LhbPoolItem,
 } from '../types'
 
 async function request<T>(urlOrInit: string | (RequestInit & { url: string })): Promise<T> {
@@ -77,5 +78,15 @@ export function useApi() {
 
     fetchLhbTradingDesk: (date: string, stockCode: string) =>
       request<LhbTradingDesk[]>(`/api/lhb/trading-desk?date=${date}&stock_code=${stockCode}`),
+
+    fetchLhbPool: (params?: { signal_type?: string }) => {
+      const qs = new URLSearchParams()
+      if (params?.signal_type) qs.set('signal_type', params.signal_type)
+      const s = qs.toString()
+      return request<LhbPoolItem[]>(`/api/lhb/pool${s ? '?' + s : ''}`)
+    },
+
+    updateLhbPool: () =>
+      request<{ status: string; message: string; updated: number; skipped: number }>({ url: '/api/lhb/pool/update', method: 'POST' }),
   }
 }

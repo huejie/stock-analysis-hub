@@ -1,7 +1,8 @@
 import json
 import logging
 import re
-from datetime import date
+import time
+from datetime import date, timedelta
 
 import httpx
 
@@ -11,6 +12,7 @@ logger = logging.getLogger("lhb_crawler")
 
 LHB_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 CONCEPT_API = "https://push2.eastmoney.com/api/qt/stock/get"
+TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://data.eastmoney.com/",
@@ -310,5 +312,156 @@ def crawl_lhb(db: Database | None = None, target_date: date | None = None) -> di
         except Exception as e:
             logger.error("信号股入库失败: %s", e)
 
+    # 5. 自动更新股池
+    try:
+        pool_result = update_lhb_pool(db)
+        logger.info("股池自动更新: 更新 %d 只, 跳过 %d 只", pool_result["updated"], pool_result["skipped"])
+    except Exception as e:
+        logger.error("股池自动更新失败: %s", e)
+
     logger.info("===== 龙虎榜抓取完成 %s =====", target_str)
     return {"date": target_str, "summary_count": len(summary_records), "signal_count": len(signals)}
+
+
+def _stock_prefix(code: str) -> str:
+    return "sz" if code[0] in "03" else "sh"
+
+
+def fetch_kline_range(stock_code: str, start_date: str, end_date: str) -> list[dict]:
+    """获取指定股票从 start_date 到 end_date 的日 K 线数据（前复权）。
+
+    Returns:
+        [{date: str, close: float}, ...] 按 date 升序
+    """
+    prefix = _stock_prefix(stock_code)
+    symbol = f"{prefix}{stock_code}"
+    try:
+        resp = httpx.get(
+            TENCENT_KLINE,
+            params={"param": f"{symbol},day,{start_date},{end_date},320,qfq"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        text = resp.text
+        idx = text.find("{")
+        if idx < 0:
+            return []
+        data = json.loads(text[idx:])
+        klines = data.get("data", {}).get(symbol, {}).get("qfqday")
+        if not klines:
+            klines = data.get("data", {}).get(symbol, {}).get("day")
+        if not klines:
+            return []
+        # kline: [日期, 开盘, 收盘, 最高, 最低, 成交量(手)]
+        return [{"date": k[0], "close": float(k[2])} for k in klines]
+    except Exception as e:
+        logger.warning("K线获取失败 %s: %s", stock_code, e)
+        return []
+
+
+def update_lhb_pool(db: Database | None = None) -> dict:
+    """更新龙虎榜股池：从 lhb_signals 同步入选记录，并计算后续涨跌幅。
+
+    Returns:
+        {"updated": int, "skipped": int}
+    """
+    if db is None:
+        db = Database()
+
+    # 1. 从 lhb_signals 同步入选记录到 lhb_pool
+    all_signals = db.query_lhb_signals()
+    pool_records = []
+    for s in all_signals:
+        tags = s.get("concept_tags")
+        if isinstance(tags, list):
+            tags = json.dumps(tags, ensure_ascii=False)
+        pool_records.append({
+            "signal_date": s["date"],
+            "stock_code": s["stock_code"],
+            "stock_name": s["stock_name"],
+            "signal_type": s["signal_type"],
+            "entry_price": s.get("close_price"),
+            "concept_tags": tags or "[]",
+            "d1_change": None,
+            "d3_change": None,
+            "d5_change": None,
+            "d10_change": None,
+            "d20_change": None,
+            "d30_change": None,
+            "latest_price": None,
+            "latest_date": None,
+            "tracking_days": 0,
+        })
+    if pool_records:
+        db.upsert_lhb_pool(pool_records)
+
+    # 2. 获取所有未完成跟踪的记录
+    tracking = db.query_lhb_pool_tracking()
+    if not tracking:
+        logger.info("股池更新: 无需跟踪的记录")
+        return {"updated": 0, "skipped": 0}
+
+    today_str = date.today().strftime("%Y-%m-%d")
+    updated = 0
+    skipped = 0
+
+    for item in tracking:
+        signal_date = item["signal_date"]
+        stock_code = item["stock_code"]
+
+        # 获取从入选日到今天的 K 线
+        # 入选日当天也包含在内，所以 +1 天确保覆盖
+        start = signal_date
+        klines = fetch_kline_range(stock_code, start, today_str)
+        if not klines:
+            skipped += 1
+            continue
+
+        # 入选日收盘价（第一天）
+        entry_price = item.get("entry_price") or (klines[0]["close"] if klines else None)
+        if not entry_price:
+            skipped += 1
+            continue
+
+        # 入选日之后的交易日（排除入选日当天）
+        # klines[0] 应该就是入选日，后续为跟踪日
+        trading_days = []
+        for k in klines:
+            if k["date"] > signal_date:
+                trading_days.append(k)
+
+        tracking_days = len(trading_days)
+        latest = trading_days[-1] if trading_days else klines[-1]
+        latest_price = latest["close"]
+        latest_date = latest["date"]
+
+        # 计算累计涨跌幅
+        def cum_change(idx: int) -> float | None:
+            if idx < len(trading_days):
+                return round((trading_days[idx]["close"] - entry_price) / entry_price * 100, 2)
+            return None
+
+        record = {
+            "signal_date": signal_date,
+            "stock_code": stock_code,
+            "stock_name": item["stock_name"],
+            "signal_type": item["signal_type"],
+            "entry_price": entry_price,
+            "concept_tags": item.get("concept_tags", "[]"),
+            "d1_change": cum_change(0),
+            "d3_change": cum_change(2),
+            "d5_change": cum_change(4),
+            "d10_change": cum_change(9),
+            "d20_change": cum_change(19),
+            "d30_change": cum_change(29),
+            "latest_price": latest_price,
+            "latest_date": latest_date,
+            "tracking_days": tracking_days,
+        }
+        db.upsert_lhb_pool([record])
+        updated += 1
+
+        time.sleep(0.3)  # 避免请求过快
+
+    logger.info("股池更新完成: 更新 %d 只, 跳过 %d 只", updated, skipped)
+    return {"updated": updated, "skipped": skipped}

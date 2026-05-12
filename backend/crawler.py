@@ -28,7 +28,7 @@ WORK_ON_WEEKEND_2026 = {
 
 # ===================== API 配置 =====================
 STOCK_API = "https://api.hunanwanzhu.com/api/wx/v2/hot/stock/buy/list"
-INCOME_API = "https://api.hunanwanzhu.com/api/wx/v3/match/group/winlose/avg/allday?match_id=37"
+INCOME_API = "https://api.hunanwanzhu.com/api/wx/v3/match/group/winlose/avg/allday?match_id=38"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
 HEADERS = {

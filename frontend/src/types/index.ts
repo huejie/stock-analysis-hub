@@ -71,3 +71,21 @@ export interface LhbTradingDesk {
   sell_amt: number | null
   net_amt: number | null
 }
+
+export interface LhbPoolItem {
+  signal_date: string
+  stock_code: string
+  stock_name: string
+  signal_types: string
+  entry_price: number | null
+  concept_tags: string[]
+  d1_change: number | null
+  d3_change: number | null
+  d5_change: number | null
+  d10_change: number | null
+  d20_change: number | null
+  d30_change: number | null
+  latest_price: number | null
+  latest_date: string | null
+  tracking_days: number
+}

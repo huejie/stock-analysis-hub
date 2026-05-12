@@ -123,6 +123,29 @@ class Database:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lhb_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_date TEXT NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    stock_name TEXT NOT NULL,
+                    signal_type TEXT NOT NULL,
+                    entry_price REAL,
+                    concept_tags TEXT,
+                    d1_change REAL,
+                    d3_change REAL,
+                    d5_change REAL,
+                    d10_change REAL,
+                    d20_change REAL,
+                    d30_change REAL,
+                    latest_price REAL,
+                    latest_date TEXT,
+                    tracking_days INTEGER DEFAULT 0,
+                    updated_at TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(signal_date, stock_code, signal_type)
+                )
+            """)
+
             # 自动创建默认赛季（如果表为空且有数据）
             count = conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0]
             if count == 0:
@@ -398,5 +421,77 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM lhb_trading_desk WHERE date = ? AND stock_code = ? ORDER BY side, net_amt DESC",
                 (date, stock_code),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ---- 龙虎榜股池 ----
+
+    def upsert_lhb_pool(self, records: list[dict]):
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO lhb_pool
+                    (signal_date, stock_code, stock_name, signal_type, entry_price,
+                     concept_tags, d1_change, d3_change, d5_change, d10_change,
+                     d20_change, d30_change, latest_price, latest_date, tracking_days)
+                VALUES
+                    (:signal_date, :stock_code, :stock_name, :signal_type, :entry_price,
+                     :concept_tags, :d1_change, :d3_change, :d5_change, :d10_change,
+                     :d20_change, :d30_change, :latest_price, :latest_date, :tracking_days)
+                ON CONFLICT(signal_date, stock_code, signal_type) DO UPDATE SET
+                    stock_name = excluded.stock_name,
+                    entry_price = COALESCE(excluded.entry_price, lhb_pool.entry_price),
+                    d1_change = excluded.d1_change,
+                    d3_change = excluded.d3_change,
+                    d5_change = excluded.d5_change,
+                    d10_change = excluded.d10_change,
+                    d20_change = excluded.d20_change,
+                    d30_change = excluded.d30_change,
+                    latest_price = excluded.latest_price,
+                    latest_date = excluded.latest_date,
+                    tracking_days = excluded.tracking_days,
+                    updated_at = datetime('now','localtime')
+            """, records)
+
+    def query_lhb_pool(self, signal_type: str = "") -> list[dict]:
+        """查询股池，按 stock_code 合并去重，只返回最近 30 天内有上榜的股票。"""
+        with self._get_conn() as conn:
+            where = "stock_code IN (SELECT DISTINCT stock_code FROM lhb_signals WHERE date >= date('now','-30 days'))"
+            params: list = []
+            if signal_type:
+                where += " AND signal_type = ?"
+                params.append(signal_type)
+
+            sql = f"""
+                SELECT
+                    stock_code,
+                    MIN(signal_date) AS signal_date,
+                    MAX(stock_name) AS stock_name,
+                    GROUP_CONCAT(DISTINCT signal_type) AS signal_types,
+                    MIN(entry_price) AS entry_price,
+                    MAX(concept_tags) AS concept_tags,
+                    SUM(CASE WHEN d1_change IS NOT NULL THEN 1 ELSE 0 END) +
+                    SUM(CASE WHEN d30_change IS NOT NULL THEN 1 ELSE 0 END) AS _dummy,
+                    MIN(d1_change) AS d1_change,
+                    MIN(d3_change) AS d3_change,
+                    MIN(d5_change) AS d5_change,
+                    MIN(d10_change) AS d10_change,
+                    MIN(d20_change) AS d20_change,
+                    MIN(d30_change) AS d30_change,
+                    MAX(latest_price) AS latest_price,
+                    MAX(latest_date) AS latest_date,
+                    MAX(tracking_days) AS tracking_days
+                FROM lhb_pool
+                WHERE {where}
+                GROUP BY stock_code
+                ORDER BY signal_date DESC
+            """
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def query_lhb_pool_tracking(self) -> list[dict]:
+        """查询所有未完成跟踪的股池记录（tracking_days < 30），用于增量更新。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM lhb_pool WHERE tracking_days < 30 ORDER BY signal_date"
             ).fetchall()
             return [dict(r) for r in rows]

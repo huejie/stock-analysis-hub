@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from backend.config import settings
 from backend.crawler import crawl_and_save
 from backend.database import Database
-from backend.lhb_crawler import crawl_lhb
+from backend.lhb_crawler import crawl_lhb, update_lhb_pool
 from backend.models import UploadResult
 from backend.ocr import analyze_image
 
@@ -379,3 +379,26 @@ async def lhb_analysis(months: int = 3):
         "sector_distribution": result,
         "signal_type_stats": type_stats,
     }
+
+
+# ---- 龙虎榜股池 ----
+
+@app.get("/api/lhb/pool")
+async def get_lhb_pool(signal_type: str = ""):
+    """查询龙虎榜股池（近30天有上榜）。可选 ?signal_type=foreign"""
+    rows = db.query_lhb_pool(signal_type=signal_type)
+    for row in rows:
+        if row.get("concept_tags"):
+            row["concept_tags"] = json.loads(row["concept_tags"])
+    return rows
+
+
+@app.post("/api/lhb/pool/update")
+async def trigger_lhb_pool_update():
+    """手动触发股池数据更新。"""
+    import asyncio
+    try:
+        result = await asyncio.to_thread(update_lhb_pool, db)
+        return {"status": "ok", "message": f"股池更新完成：更新 {result['updated']} 只，跳过 {result['skipped']} 只", **result}
+    except Exception as e:
+        raise HTTPException(500, f"股池更新失败: {str(e)}")

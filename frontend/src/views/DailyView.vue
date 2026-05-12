@@ -15,6 +15,10 @@ const date = ref(new Date().toISOString().slice(0, 10))
 const availableDates = ref<string[]>([])
 const data = ref<DailyStatsResponse | null>(null)
 const loading = ref(false)
+const crawling = ref(false)
+const crawlTarget = ref('')
+const toastMsg = ref('')
+const toastVisible = ref(false)
 const historyMap = ref<Map<string, StockRecord[]>>(new Map())
 const selectedCode = ref<string | null>(null)
 
@@ -51,6 +55,26 @@ function getRankChange(code: string, today: StockRecord[], prev: StockRecord[]):
   if (diff === 0) return ''
   if (diff > 0) return `<span class="badge badge-up">&#9650;${diff}</span>`
   return `<span class="badge badge-down">&#9660;${Math.abs(diff)}</span>`
+}
+
+function showToast(msg: string) {
+  toastMsg.value = msg
+  toastVisible.value = true
+  setTimeout(() => { toastVisible.value = false }, 2500)
+}
+
+async function handleCrawl() {
+  crawling.value = true
+  try {
+    const res = await api.crawlToday()
+    showToast(res.message)
+    await loadDates()
+    await load()
+  } catch (e: unknown) {
+    showToast('抓取失败: ' + (e instanceof Error ? e.message : String(e)))
+  } finally {
+    crawling.value = false
+  }
 }
 
 async function loadDates() {
@@ -225,11 +249,17 @@ init()
 
 <template>
   <div>
-    <!-- Date navigation (only for daily view) -->
-    <div v-if="data" class="date-group">
-      <button class="btn-icon" title="前一天" @click="prevDate">&#9664;</button>
-      <input v-model="date" type="date" @change="load">
-      <button class="btn-icon" title="后一天" @click="nextDate">&#9654;</button>
+    <!-- Date navigation -->
+    <div class="lhb-header">
+      <div class="date-group" style="margin-bottom:0">
+        <button class="btn-icon" title="前一天" @click="prevDate">&#9664;</button>
+        <input v-model="date" type="date" @change="load">
+        <button class="btn-icon" title="后一天" @click="nextDate">&#9654;</button>
+      </div>
+      <button class="btn btn-primary btn-sm" :disabled="crawling" @click="handleCrawl">
+        {{ crawling ? '抓取中...' : '抓取今日' }}
+      </button>
+      <div v-if="toastVisible" class="toast-inline">{{ toastMsg }}</div>
     </div>
 
     <EmptyState v-if="!data && !loading" />

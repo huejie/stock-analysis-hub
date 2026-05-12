@@ -975,6 +975,100 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
 }
 .lhb-analysis-controls {
     margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.lhb-checkbox-label {
+    color: var(--text-muted);
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+.lhb-checkbox-label input[type="checkbox"] {
+    accent-color: var(--accent);
+}
+.btn-sm {
+    font-size: 12px;
+    padding: 4px 12px;
+}
+.lhb-pool-table td,
+.lhb-pool-table th {
+    font-size: 12px;
+    padding: 6px 8px;
+    white-space: nowrap;
+}
+.lhb-mono {
+    font-family: var(--font-mono);
+}
+.lhb-signal-tag {
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 3px;
+    padding: 2px 6px;
+    text-align: center;
+}
+.lhb-tag-foreign {
+    color: #60a5fa;
+    background: rgba(96, 165, 250, 0.12);
+}
+.lhb-tag-inst {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.12);
+}
+.lhb-tag-both {
+    color: #f472b6;
+    background: rgba(244, 114, 182, 0.12);
+}
+.lhb-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+.lhb-tab {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+}
+.lhb-tab:hover {
+    color: var(--text);
+}
+.lhb-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.lhb-tab-count {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+.lhb-search {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 5px 10px;
+    width: 160px;
+    outline: none;
+}
+.lhb-search:focus {
+    border-color: var(--accent);
+}
+.lhb-sort-th {
+    cursor: pointer;
+    user-select: none;
+}
+.lhb-sort-th:hover {
+    color: var(--accent);
 }
 .toast-inline {
     font-size: 13px;
