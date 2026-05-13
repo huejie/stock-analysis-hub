@@ -88,5 +88,8 @@ export function useApi() {
 
     updateLhbPool: () =>
       request<{ status: string; message: string; updated: number; skipped: number }>({ url: '/api/lhb/pool/update', method: 'POST' }),
+
+    getLhbPoolStatus: () =>
+      request<{ running: boolean; last_result: { finished_at?: string; updated?: number; skipped?: number; remaining?: number; error?: string } | null }>({ url: '/api/lhb/pool/status' }),
   }
 }

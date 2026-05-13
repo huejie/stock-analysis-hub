@@ -27,6 +27,7 @@ const sectorChartRef = ref()
 const poolData = ref<LhbPoolItem[]>([])
 const poolLoading = ref(false)
 const poolUpdating = ref(false)
+const poolStatusMsg = ref('')
 const poolFilter = ref<'all' | 'foreign' | 'inst_dense'>('all')
 const poolSearch = ref('')
 const poolSortKey = ref<string>('signal_date')
@@ -252,13 +253,42 @@ async function loadPool() {
 
 async function handleUpdatePool() {
   poolUpdating.value = true
+  poolStatusMsg.value = ''
   try {
     const res = await api.updateLhbPool()
     showToast(res.message)
-    await loadPool()
+    if (res.status === 'started') {
+      // 后台执行，轮询状态
+      poolStatusMsg.value = '更新中...'
+      const poll = setInterval(async () => {
+        try {
+          const st = await api.getLhbPoolStatus()
+          if (!st.running) {
+            clearInterval(poll)
+            poolUpdating.value = false
+            if (st.last_result?.error) {
+              poolStatusMsg.value = '更新失败: ' + st.last_result.error
+              showToast(poolStatusMsg.value)
+            } else {
+              const r = st.last_result
+              poolStatusMsg.value = r
+                ? `更新完成: ${r.updated}只已更新, ${r.skipped}只跳过`
+                : ''
+              showToast(poolStatusMsg.value)
+            }
+            await loadPool()
+          }
+        } catch {
+          clearInterval(poll)
+          poolUpdating.value = false
+        }
+      }, 3000)
+    } else {
+      poolUpdating.value = false
+      await loadPool()
+    }
   } catch (e: unknown) {
     showToast('更新失败: ' + (e instanceof Error ? e.message : String(e)))
-  } finally {
     poolUpdating.value = false
   }
 }
@@ -501,6 +531,7 @@ init()
         <button class="btn btn-outline btn-sm" :disabled="poolUpdating" @click="handleUpdatePool">
           {{ poolUpdating ? '更新中...' : '更新数据' }}
         </button>
+        <span v-if="poolStatusMsg" class="ct-hint">{{ poolStatusMsg }}</span>
       </div>
       <div v-if="poolLoading" class="lhb-loading">加载中...</div>
       <div v-else-if="filteredPool.length === 0" class="lhb-empty">暂无股池数据</div>

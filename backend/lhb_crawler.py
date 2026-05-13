@@ -359,7 +359,7 @@ def fetch_kline_range(stock_code: str, start_date: str, end_date: str) -> list[d
         return []
 
 
-def update_lhb_pool(db: Database | None = None, max_items: int = 100) -> dict:
+def update_lhb_pool(db: Database | None = None, max_items: int = 500) -> dict:
     """更新龙虎榜股池：从 lhb_signals 同步入选记录，并计算后续涨跌幅。
 
     Args:
@@ -373,17 +373,21 @@ def update_lhb_pool(db: Database | None = None, max_items: int = 100) -> dict:
 
     # 1. 从 lhb_signals 同步最近 30 天的入选记录到 lhb_pool（增量）
     thirty_days_ago = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
-    all_signals = db.query_lhb_signals()  # 全量，但下面只取近30天
+    all_signals = db.query_lhb_signals()  # 全量，但下面只取近30天（已排除ST）
     pool_records = []
     for s in all_signals:
         if s["date"] < thirty_days_ago:
+            continue
+        # 跳过非A股（转债、基金等）
+        code = s["stock_code"]
+        if not code.startswith(("00", "30", "60", "68")):
             continue
         tags = s.get("concept_tags")
         if isinstance(tags, list):
             tags = json.dumps(tags, ensure_ascii=False)
         pool_records.append({
             "signal_date": s["date"],
-            "stock_code": s["stock_code"],
+            "stock_code": code,
             "stock_name": s["stock_name"],
             "signal_type": s["signal_type"],
             "entry_price": s.get("close_price"),

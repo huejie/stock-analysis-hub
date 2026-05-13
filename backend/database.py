@@ -400,6 +400,11 @@ class Database:
                     concept_tags = COALESCE(excluded.concept_tags, lhb_signals.concept_tags)
             """, records)
 
+    @staticmethod
+    def _is_st(stock_name: str) -> bool:
+        """判断是否为ST股票（含*ST、ST、S*ST等）。"""
+        return "ST" in stock_name.upper()
+
     def query_lhb_signals(self, date: str = "") -> list[dict]:
         with self._get_conn() as conn:
             if date:
@@ -411,7 +416,7 @@ class Database:
                 rows = conn.execute(
                     "SELECT * FROM lhb_signals ORDER BY date DESC, signal_type, net_amt DESC"
                 ).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in rows if not self._is_st(r["stock_name"])]
 
     def query_lhb_signals_range(self, start: str, end: str) -> list[dict]:
         with self._get_conn() as conn:
@@ -419,7 +424,7 @@ class Database:
                 "SELECT * FROM lhb_signals WHERE date BETWEEN ? AND ? ORDER BY date DESC",
                 (start, end),
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in rows if not self._is_st(r["stock_name"])]
 
     def get_lhb_signal_dates(self) -> list[str]:
         with self._get_conn() as conn:
@@ -465,7 +470,7 @@ class Database:
             """, records)
 
     def query_lhb_pool(self, signal_type: str = "") -> list[dict]:
-        """查询股池，按 stock_code 合并去重，只返回最近 30 天内有上榜的股票。"""
+        """查询股池，按 stock_code 合并去重，只返回最近 30 天内有上榜的股票。排除ST。"""
         with self._get_conn() as conn:
             where = "stock_code IN (SELECT DISTINCT stock_code FROM lhb_signals WHERE date >= date('now','-30 days'))"
             params: list = []
@@ -498,7 +503,7 @@ class Database:
                 ORDER BY signal_date DESC
             """
             rows = conn.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in rows if not self._is_st(r["stock_name"])]
 
     def query_lhb_pool_tracking(self) -> list[dict]:
         """查询所有未完成跟踪的股池记录（tracking_days < 30），用于增量更新。"""

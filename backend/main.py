@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -393,15 +394,40 @@ async def get_lhb_pool(signal_type: str = ""):
     return rows
 
 
+@dataclass
+class PoolUpdateState:
+    running: bool = False
+    last_result: dict | None = None
+
+_pool_update_state = PoolUpdateState()
+
+@app.get("/api/lhb/pool/status")
+async def get_pool_update_status():
+    """查询股池更新状态。"""
+    return {
+        "running": _pool_update_state.running,
+        "last_result": _pool_update_state.last_result,
+    }
+
 @app.post("/api/lhb/pool/update")
 async def trigger_lhb_pool_update():
-    """手动触发股池数据更新。"""
+    """手动触发股池数据更新（后台异步执行）。"""
+    if _pool_update_state.running:
+        return {"status": "already_running", "message": "股池正在更新中，请稍后刷新查看"}
     import asyncio
-    try:
-        result = await asyncio.to_thread(update_lhb_pool, db)
-        msg = f"股池更新完成：更新 {result['updated']} 只，跳过 {result['skipped']} 只"
-        if result.get("remaining", 0) > 0:
-            msg += f"，剩余 {result['remaining']} 只待处理"
-        return {"status": "ok", "message": msg, **result}
-    except Exception as e:
-        raise HTTPException(500, f"股池更新失败: {str(e)}")
+
+    def _run():
+        _pool_update_state.running = True
+        try:
+            result = update_lhb_pool(db)
+            _pool_update_state.last_result = {
+                "finished_at": datetime.now().isoformat(),
+                **result,
+            }
+        except Exception as e:
+            _pool_update_state.last_result = {"error": str(e)}
+        finally:
+            _pool_update_state.running = False
+
+    asyncio.get_running_loop().run_in_executor(None, _run)
+    return {"status": "started", "message": "股池更新已启动，后台执行中..."}
