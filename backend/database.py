@@ -443,7 +443,8 @@ class Database:
 
     # ---- 龙虎榜股池 ----
 
-    def upsert_lhb_pool(self, records: list[dict]):
+    def sync_lhb_pool_signals(self, records: list[dict]):
+        """信号同步阶段专用：插入新记录，冲突时只更新信号字段（名称/价格/板块），不碰跟踪数据。"""
         with self._get_conn() as conn:
             conn.executemany("""
                 INSERT INTO lhb_pool
@@ -457,15 +458,38 @@ class Database:
                 ON CONFLICT(signal_date, stock_code, signal_type) DO UPDATE SET
                     stock_name = excluded.stock_name,
                     entry_price = COALESCE(excluded.entry_price, lhb_pool.entry_price),
-                    d1_change = excluded.d1_change,
-                    d3_change = excluded.d3_change,
-                    d5_change = excluded.d5_change,
-                    d10_change = excluded.d10_change,
-                    d20_change = excluded.d20_change,
-                    d30_change = excluded.d30_change,
-                    latest_price = excluded.latest_price,
-                    latest_date = excluded.latest_date,
-                    tracking_days = excluded.tracking_days,
+                    concept_tags = COALESCE(excluded.concept_tags, lhb_pool.concept_tags),
+                    updated_at = datetime('now','localtime')
+            """, records)
+
+    def upsert_lhb_pool(self, records: list[dict]):
+        """更新股池记录（跟踪阶段）。冲突时用 COALESCE 保护已有数据不被 NULL 覆盖。"""
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO lhb_pool
+                    (signal_date, stock_code, stock_name, signal_type, entry_price,
+                     concept_tags, d1_change, d3_change, d5_change, d10_change,
+                     d20_change, d30_change, latest_price, latest_date, tracking_days)
+                VALUES
+                    (:signal_date, :stock_code, :stock_name, :signal_type, :entry_price,
+                     :concept_tags, :d1_change, :d3_change, :d5_change, :d10_change,
+                     :d20_change, :d30_change, :latest_price, :latest_date, :tracking_days)
+                ON CONFLICT(signal_date, stock_code, signal_type) DO UPDATE SET
+                    stock_name = excluded.stock_name,
+                    entry_price = COALESCE(excluded.entry_price, lhb_pool.entry_price),
+                    d1_change = COALESCE(excluded.d1_change, lhb_pool.d1_change),
+                    d3_change = COALESCE(excluded.d3_change, lhb_pool.d3_change),
+                    d5_change = COALESCE(excluded.d5_change, lhb_pool.d5_change),
+                    d10_change = COALESCE(excluded.d10_change, lhb_pool.d10_change),
+                    d20_change = COALESCE(excluded.d20_change, lhb_pool.d20_change),
+                    d30_change = COALESCE(excluded.d30_change, lhb_pool.d30_change),
+                    latest_price = COALESCE(excluded.latest_price, lhb_pool.latest_price),
+                    latest_date = COALESCE(excluded.latest_date, lhb_pool.latest_date),
+                    concept_tags = COALESCE(excluded.concept_tags, lhb_pool.concept_tags),
+                    tracking_days = CASE
+                        WHEN excluded.tracking_days > lhb_pool.tracking_days THEN excluded.tracking_days
+                        ELSE lhb_pool.tracking_days
+                    END,
                     updated_at = datetime('now','localtime')
             """, records)
 

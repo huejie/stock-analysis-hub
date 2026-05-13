@@ -403,7 +403,7 @@ def update_lhb_pool(db: Database | None = None, max_items: int = 500) -> dict:
             "tracking_days": 0,
         })
     if pool_records:
-        db.upsert_lhb_pool(pool_records)
+        db.sync_lhb_pool_signals(pool_records)
         logger.info("股池同步: %d 条近30天信号入库", len(pool_records))
 
     # 2. 获取所有未完成跟踪的记录（只处理近30天内的）
