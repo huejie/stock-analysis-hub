@@ -359,19 +359,25 @@ def fetch_kline_range(stock_code: str, start_date: str, end_date: str) -> list[d
         return []
 
 
-def update_lhb_pool(db: Database | None = None) -> dict:
+def update_lhb_pool(db: Database | None = None, max_items: int = 100) -> dict:
     """更新龙虎榜股池：从 lhb_signals 同步入选记录，并计算后续涨跌幅。
 
+    Args:
+        max_items: 单次最多处理的跟踪记录数，避免超时
+
     Returns:
-        {"updated": int, "skipped": int}
+        {"updated": int, "skipped": int, "remaining": int}
     """
     if db is None:
         db = Database()
 
-    # 1. 从 lhb_signals 同步入选记录到 lhb_pool
-    all_signals = db.query_lhb_signals()
+    # 1. 从 lhb_signals 同步最近 30 天的入选记录到 lhb_pool（增量）
+    thirty_days_ago = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+    all_signals = db.query_lhb_signals()  # 全量，但下面只取近30天
     pool_records = []
     for s in all_signals:
+        if s["date"] < thirty_days_ago:
+            continue
         tags = s.get("concept_tags")
         if isinstance(tags, list):
             tags = json.dumps(tags, ensure_ascii=False)
@@ -394,12 +400,18 @@ def update_lhb_pool(db: Database | None = None) -> dict:
         })
     if pool_records:
         db.upsert_lhb_pool(pool_records)
+        logger.info("股池同步: %d 条近30天信号入库", len(pool_records))
 
-    # 2. 获取所有未完成跟踪的记录
+    # 2. 获取所有未完成跟踪的记录（只处理近30天内的）
     tracking = db.query_lhb_pool_tracking()
+    # 只保留近30天的记录，避免处理历史数据
+    tracking = [t for t in tracking if t["signal_date"] >= thirty_days_ago]
+    # 限制单次处理数量，避免超时
+    remaining = len(tracking)
+    tracking = tracking[:max_items]
     if not tracking:
         logger.info("股池更新: 无需跟踪的记录")
-        return {"updated": 0, "skipped": 0}
+        return {"updated": 0, "skipped": 0, "remaining": 0}
 
     today_str = date.today().strftime("%Y-%m-%d")
     updated = 0
@@ -410,7 +422,6 @@ def update_lhb_pool(db: Database | None = None) -> dict:
         stock_code = item["stock_code"]
 
         # 获取从入选日到今天的 K 线
-        # 入选日当天也包含在内，所以 +1 天确保覆盖
         start = signal_date
         klines = fetch_kline_range(stock_code, start, today_str)
         if not klines:
@@ -424,7 +435,6 @@ def update_lhb_pool(db: Database | None = None) -> dict:
             continue
 
         # 入选日之后的交易日（排除入选日当天）
-        # klines[0] 应该就是入选日，后续为跟踪日
         trading_days = []
         for k in klines:
             if k["date"] > signal_date:
@@ -435,10 +445,11 @@ def update_lhb_pool(db: Database | None = None) -> dict:
         latest_price = latest["close"]
         latest_date = latest["date"]
 
-        # 计算累计涨跌幅
-        def cum_change(idx: int) -> float | None:
-            if idx < len(trading_days):
-                return round((trading_days[idx]["close"] - entry_price) / entry_price * 100, 2)
+        # 计算累计涨跌幅（使用闭包捕获 entry_price）
+        _ep = entry_price
+        def cum_change(idx: int, _entry=_ep, _tdays=trading_days) -> float | None:
+            if idx < len(_tdays):
+                return round((_tdays[idx]["close"] - _entry) / _entry * 100, 2)
             return None
 
         record = {
@@ -461,7 +472,8 @@ def update_lhb_pool(db: Database | None = None) -> dict:
         db.upsert_lhb_pool([record])
         updated += 1
 
-        time.sleep(0.3)  # 避免请求过快
+        time.sleep(0.15)  # 缩短间隔，避免请求过快
 
-    logger.info("股池更新完成: 更新 %d 只, 跳过 %d 只", updated, skipped)
-    return {"updated": updated, "skipped": skipped}
+    remaining = remaining - updated - skipped
+    logger.info("股池更新完成: 更新 %d 只, 跳过 %d 只, 剩余 %d 只", updated, skipped, remaining)
+    return {"updated": updated, "skipped": skipped, "remaining": remaining}

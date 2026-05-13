@@ -399,6 +399,9 @@ async def trigger_lhb_pool_update():
     import asyncio
     try:
         result = await asyncio.to_thread(update_lhb_pool, db)
-        return {"status": "ok", "message": f"股池更新完成：更新 {result['updated']} 只，跳过 {result['skipped']} 只", **result}
+        msg = f"股池更新完成：更新 {result['updated']} 只，跳过 {result['skipped']} 只"
+        if result.get("remaining", 0) > 0:
+            msg += f"，剩余 {result['remaining']} 只待处理"
+        return {"status": "ok", "message": msg, **result}
     except Exception as e:
         raise HTTPException(500, f"股池更新失败: {str(e)}")

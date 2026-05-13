@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 顽主杯数据爬虫 cron 定时任务安装脚本
-# 每天 19:00 自动执行爬虫
+# 每天 20:00 自动执行爬虫
 #
 # 用法:
 #   bash setup_crawler_cron.sh          # 安装
@@ -11,10 +11,10 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
-# 顽主杯爬虫：每天 19:00
+# 顽主杯爬虫：每天 20:00
 CRAWL_MARKER="stock-crawler"
 CRAWL_CMD="cd $PROJECT_DIR && $VENV_PYTHON $PROJECT_DIR/crawl.py >> $PROJECT_DIR/data/crawler.log 2>&1"
-CRAWL_ENTRY="0 19 * * * $CRAWL_CMD  # $CRAWL_MARKER"
+CRAWL_ENTRY="0 20 * * * $CRAWL_CMD  # $CRAWL_MARKER"
 
 # 龙虎榜爬虫：每天 18:00
 LHB_MARKER="stock-lhb-crawler"
@@ -55,7 +55,7 @@ fi
 # 添加 cron 任务
 if ! $skip_crawl; then
     (crontab -l 2>/dev/null; echo "$CRAWL_ENTRY") | crontab -
-    echo "顽主杯 cron 已安装（每天 19:00）"
+    echo "顽主杯 cron 已安装（每天 20:00）"
 fi
 if ! $skip_lhb; then
     (crontab -l 2>/dev/null; echo "$LHB_ENTRY") | crontab -
