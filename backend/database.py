@@ -1,6 +1,9 @@
+import logging
 import sqlite3
 from pathlib import Path
 from backend.config import settings
+
+logger = logging.getLogger("database")
 
 
 class Database:
@@ -220,6 +223,15 @@ class Database:
                     per_capital_position = COALESCE(excluded.per_capital_position, stock_records.per_capital_position),
                     total_fund = COALESCE(excluded.total_fund, stock_records.total_fund)
             """, records)
+
+    def delete_records_by_date(self, date_str: str):
+        """删除指定日期的所有股票记录，用于重新爬取时避免叠加。"""
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM stock_records WHERE date = ?",
+                (date_str,),
+            )
+            logger.info("已清除 %s 的旧记录", date_str)
 
     def query_by_date(self, date: str) -> list[dict]:
         with self._get_conn() as conn:

@@ -52,8 +52,12 @@ def is_trade_day(check_date: date) -> bool:
 
 
 def _stock_prefix(code: str) -> str:
-    """根据股票代码判断沪深市场前缀。"""
-    return "sz" if code[0] in "03" else "sh"
+    """根据股票代码判断沪深市场前缀。
+    
+    深市: 000/001/002/003/300/301 开头
+    沪市: 600/601/603/605/688/689 开头
+    """
+    return "sz" if code[:3] in ("000", "001", "002", "003", "300", "301") else "sh"
 
 
 def fetch_stock_data(date_str: str) -> list[dict]:
@@ -156,6 +160,22 @@ def fetch_quotes(codes: list[str], date_str: str) -> dict[str, dict]:
             if len(klines) >= 1:
                 # kline: [日期, 开盘, 收盘, 最高, 最低, 成交量(手)]
                 today = klines[-1]
+                kline_date = today[0]
+
+                # 检查最后一条K线日期是否匹配目标日期
+                # 不匹配说明当日K线还没更新，取到的是前一日的数据
+                if kline_date != date_str:
+                    logger.warning(
+                        "K线日期不匹配 %s: 期望%s, 实际%s, 跳过涨跌幅",
+                        code, date_str, kline_date,
+                    )
+                    result[code] = {
+                        "price_change_pct": None,
+                        "turnover_amount": None,
+                        "price_action": f"K线未更新({kline_date})",
+                    }
+                    continue
+
                 close = float(today[2])
                 vol_lots = float(today[5])  # 手
                 turnover = round(vol_lots * 100 * close / 1e8, 2)  # 亿元
@@ -248,6 +268,8 @@ def crawl_and_save(db: Database | None = None, target_date: date | None = None) 
     stock_records = fetch_stock_data(target_str)
     if stock_records:
         try:
+            # 先清除该日期旧记录，避免多次爬取叠加导致同一排名有多只股票
+            db.delete_records_by_date(target_str)
             db.upsert_records(stock_records)
             stock_count = len(stock_records)
             logger.info("股票数据入库成功: %d 条", stock_count)
