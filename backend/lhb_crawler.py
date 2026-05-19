@@ -21,6 +21,7 @@ HEADERS = {
 # 境外机构营业部名称关键词（实际名称含"股份有限公司"等，关键词需足够短才能匹配）
 FOREIGN_INSTITUTIONS = [
     "国泰海通证券股份有限公司总部",
+    "国泰海通证券股份有限公司上海分公司",
     "中信证券股份有限公司上海分公司",
     "瑞银证券有限责任公司上海花园石桥路",
     "摩根大通证券",
@@ -93,7 +94,11 @@ def fetch_lhb_data(date_str: str) -> list[dict]:
 
 
 def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) -> list[dict]:
-    """抓取指定股票在指定日期的买卖营业部明细。"""
+    """抓取指定股票在指定日期的买卖营业部明细。
+
+    注意：当股票因多个原因上榜时，API会返回重复的营业部记录（每个原因一套）。
+    这里做去重处理，并给同名席位（如多个"机构专用"）分配 seat_index 以便区分。
+    """
     records = []
     for side, report_name in [("buy", "RPT_BILLBOARD_DAILYDETAILSBUY"), ("sell", "RPT_BILLBOARD_DAILYDETAILSSELL")]:
         try:
@@ -120,13 +125,33 @@ def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) 
             continue
 
         result = body.get("result") or {}
-        for item in result.get("data", []):
+        raw_items = result.get("data", [])
+
+        # 去重：API可能因多原因上榜返回重复记录，按 (dept_name, buy/sell金额) 去重
+        seen = set()
+        unique_items = []
+        for item in raw_items:
+            dept = item.get("OPERATEDEPT_NAME", "")
+            buy = item.get("BUY")
+            sell = item.get("SELL")
+            key = (dept, buy, sell)
+            if key not in seen:
+                seen.add(key)
+                unique_items.append(item)
+
+        # 给同名席位分配序号
+        dept_counter: dict[str, int] = {}
+        for item in unique_items:
+            dept = item.get("OPERATEDEPT_NAME", "")
+            idx = dept_counter.get(dept, 0)
+            dept_counter[dept] = idx + 1
             records.append({
                 "date": date_str,
                 "stock_code": stock_code,
                 "stock_name": stock_name,
                 "side": side,
-                "dept_name": item.get("OPERATEDEPT_NAME", ""),
+                "dept_name": dept,
+                "seat_index": idx,
                 "buy_amt": item.get("BUY"),
                 "sell_amt": item.get("SELL"),
                 "net_amt": item.get("NET"),

@@ -47,6 +47,46 @@ class Database:
             if "total_fund" not in cols:
                 conn.execute("ALTER TABLE stock_records ADD COLUMN total_fund REAL")
 
+            # lhb_trading_desk: 迁移添加 seat_index 字段并更新 UNIQUE 约束
+            td_cols = {r[1] for r in conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()}
+            if "seat_index" not in td_cols:
+                conn.execute("ALTER TABLE lhb_trading_desk ADD COLUMN seat_index INTEGER NOT NULL DEFAULT 0")
+            # 检查UNIQUE约束是否包含seat_index（旧约束是 date,stock_code,side,dept_name）
+            # SQLite不支持ALTER约束，需要重建表
+            idx_cols = set()
+            for idx_row in conn.execute("PRAGMA index_list(lhb_trading_desk)").fetchall():
+                if idx_row[3] == 'u':  # unique index
+                    for c in conn.execute(f"PRAGMA index_info({idx_row[1]})").fetchall():
+                        col_name = conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()[c[1] - 1][1] if c[1] > 0 else ''
+                        idx_cols.add(col_name)
+            if 'seat_index' not in idx_cols:
+                logger.info("迁移 lhb_trading_desk: 重建表以更新UNIQUE约束")
+                conn.execute("""
+                    CREATE TABLE lhb_trading_desk_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
+                        stock_name TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        seat_index INTEGER NOT NULL DEFAULT 0,
+                        dept_name TEXT NOT NULL,
+                        buy_amt REAL,
+                        sell_amt REAL,
+                        net_amt REAL,
+                        created_at TEXT DEFAULT (datetime('now','localtime')),
+                        UNIQUE(date, stock_code, side, dept_name, seat_index)
+                    )
+                """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO lhb_trading_desk_new
+                    SELECT id, date, stock_code, stock_name, side,
+                           COALESCE(seat_index, 0), dept_name, buy_amt, sell_amt, net_amt, created_at
+                    FROM lhb_trading_desk
+                """)
+                conn.execute("DROP TABLE lhb_trading_desk")
+                conn.execute("ALTER TABLE lhb_trading_desk_new RENAME TO lhb_trading_desk")
+                logger.info("lhb_trading_desk 表迁移完成")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS season_daily_stats (
                     date TEXT PRIMARY KEY,
@@ -98,12 +138,13 @@ class Database:
                     stock_code TEXT NOT NULL,
                     stock_name TEXT NOT NULL,
                     side TEXT NOT NULL,
+                    seat_index INTEGER NOT NULL DEFAULT 0,
                     dept_name TEXT NOT NULL,
                     buy_amt REAL,
                     sell_amt REAL,
                     net_amt REAL,
                     created_at TEXT DEFAULT (datetime('now','localtime')),
-                    UNIQUE(date, stock_code, side, dept_name)
+                    UNIQUE(date, stock_code, side, dept_name, seat_index)
                 )
             """)
 
@@ -370,10 +411,10 @@ class Database:
         with self._get_conn() as conn:
             conn.executemany("""
                 INSERT INTO lhb_trading_desk
-                    (date, stock_code, stock_name, side, dept_name, buy_amt, sell_amt, net_amt)
+                    (date, stock_code, stock_name, side, seat_index, dept_name, buy_amt, sell_amt, net_amt)
                 VALUES
-                    (:date, :stock_code, :stock_name, :side, :dept_name, :buy_amt, :sell_amt, :net_amt)
-                ON CONFLICT(date, stock_code, side, dept_name) DO UPDATE SET
+                    (:date, :stock_code, :stock_name, :side, :seat_index, :dept_name, :buy_amt, :sell_amt, :net_amt)
+                ON CONFLICT(date, stock_code, side, dept_name, seat_index) DO UPDATE SET
                     stock_name = excluded.stock_name,
                     buy_amt = COALESCE(excluded.buy_amt, lhb_trading_desk.buy_amt),
                     sell_amt = COALESCE(excluded.sell_amt, lhb_trading_desk.sell_amt),
@@ -530,9 +571,9 @@ class Database:
             return [dict(r) for r in rows if not self._is_st(r["stock_name"])]
 
     def query_lhb_pool_tracking(self) -> list[dict]:
-        """查询所有未完成跟踪的股池记录（tracking_days < 30），用于增量更新。"""
+        """查询所有未完成跟踪的股池记录（tracking_days < 30），优先处理 tracking_days=0 的。"""
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM lhb_pool WHERE tracking_days < 30 ORDER BY signal_date"
+                "SELECT * FROM lhb_pool WHERE tracking_days < 30 ORDER BY tracking_days ASC, signal_date DESC"
             ).fetchall()
             return [dict(r) for r in rows]

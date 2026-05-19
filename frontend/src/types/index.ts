@@ -66,6 +66,7 @@ export interface LhbTradingDesk {
   stock_code: string
   stock_name: string
   side: 'buy' | 'sell'
+  seat_index: number
   dept_name: string
   buy_amt: number | null
   sell_amt: number | null

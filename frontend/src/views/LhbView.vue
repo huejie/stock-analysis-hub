@@ -87,6 +87,28 @@ function getSellDesks(code: string) {
   return (deskMap.value.get(code) || []).filter(d => d.side === 'sell')
 }
 
+const FOREIGN_KEYWORDS = [
+  '国泰海通证券股份有限公司总部',
+  '国泰海通证券股份有限公司上海分公司',
+  '中信证券股份有限公司上海分公司',
+  '瑞银证券有限责任公司上海花园石桥路',
+  '摩根大通证券',
+  '高盛(中国)证券',
+  '高盛（中国）证券',
+]
+
+function isForeignDept(name: string): boolean {
+  return FOREIGN_KEYWORDS.some(kw => name.includes(kw))
+}
+
+function getForeignBuyDesks(code: string) {
+  return getBuyDesks(code).filter(d => isForeignDept(d.dept_name))
+}
+
+function getForeignSellDesks(code: string) {
+  return getSellDesks(code).filter(d => isForeignDept(d.dept_name))
+}
+
 async function loadDates() {
   const res = await api.fetchLhbSignalDates()
   signalDates.value = res.dates
@@ -398,20 +420,20 @@ init()
                 <td colspan="6" class="lhb-desk-cell">
                   <div class="lhb-desk-wrap">
                     <div class="lhb-desk-side">
-                      <div class="lhb-desk-title lhb-buy-title">买入营业部</div>
-                      <div v-for="d in getBuyDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                      <div class="lhb-desk-title lhb-buy-title">境外买入</div>
+                      <div v-for="d in getForeignBuyDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
                         <span class="lhb-desk-name">{{ d.dept_name }}</span>
                         <span class="lhb-desk-amt">{{ fmtAmt(d.buy_amt) }}</span>
                       </div>
-                      <div v-if="getBuyDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                      <div v-if="getForeignBuyDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
                     </div>
                     <div class="lhb-desk-side">
-                      <div class="lhb-desk-title lhb-sell-title">卖出营业部</div>
-                      <div v-for="d in getSellDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
+                      <div class="lhb-desk-title lhb-sell-title">境外卖出</div>
+                      <div v-for="d in getForeignSellDesks(s.stock_code)" :key="d.dept_name" class="lhb-desk-item">
                         <span class="lhb-desk-name">{{ d.dept_name }}</span>
                         <span class="lhb-desk-amt">{{ fmtAmt(d.sell_amt) }}</span>
                       </div>
-                      <div v-if="getSellDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
+                      <div v-if="getForeignSellDesks(s.stock_code).length === 0" class="lhb-desk-empty">-</div>
                     </div>
                   </div>
                 </td>
