@@ -388,6 +388,11 @@ body::before {
     margin-top: 3px;
     min-height: 16px;
 }
+.info-btn {
+    background: none; border: none; color: #64748b; cursor: pointer;
+    font-size: 0.9em; padding: 0 4px; margin-left: 4px;
+}
+.info-btn:hover { color: #3b82f6; }
 
 .stock-card .card-body {
     margin-top: 4px;
@@ -1133,6 +1138,24 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
     color: var(--text-muted);
     padding: 4px 0;
 }
+
+/* ===== Streak Tracking ===== */
+.streak-days { font-weight: 700; font-size: 1.1em; text-align: center; }
+.streak-title .ct-hint { font-size: 0.75em; opacity: 0.5; }
+
+/* ===== Daily Report ===== */
+.report-panel { background: #131b2e; border: 1px solid #1e293b; border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+.report-header { padding: 12px 16px; font-weight: 700; color: #e2e8f0; border-bottom: 1px solid #1e293b; }
+.report-body { padding: 12px 16px; }
+.report-section { margin-bottom: 12px; }
+.report-section:last-child { margin-bottom: 0; }
+.report-section-title { font-weight: 600; color: #94a3b8; font-size: 0.85em; margin-bottom: 4px; }
+.report-item { padding: 2px 0; font-size: 0.9em; color: #cbd5e1; }
+.report-new, .report-foreign { color: #ef4444; }
+.report-rise, .report-streak { color: #22c55e; }
+.report-exit { color: #64748b; }
+.report-inst_dense { color: #3b82f6; }
+.report-sector { color: #a78bfa; }
 
 /* ===== Responsive ===== */
 @media (max-width: 900px) {

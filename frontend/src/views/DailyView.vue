@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, inject, type Ref } from 'vue'
-import type { StockRecord, DailyStatsResponse } from '../types'
+import type { StockRecord, DailyStatsResponse, StreakItem, DailyReportResponse } from '../types'
 import { useApi } from '../composables/useApi'
 import { buildChangeChartOption, buildHoldersChartOption } from '../charts/daily'
 import { CHART_COLORS, CHART_BASE } from '../charts/theme'
 import ChartBox from '../components/ChartBox.vue'
 import StockCard from '../components/StockCard.vue'
+import StockDetail from '../components/StockDetail.vue'
 import EmptyState from '../components/EmptyState.vue'
 
 const api = useApi()
@@ -21,6 +22,14 @@ const toastMsg = ref('')
 const toastVisible = ref(false)
 const historyMap = ref<Map<string, StockRecord[]>>(new Map())
 const selectedCode = ref<string | null>(null)
+
+const streaks = ref<StreakItem[]>([])
+const showStreaks = ref(true)
+const detailCode = ref<string | null>(null)
+const detailName = ref('')
+const report = ref<DailyReportResponse | null>(null)
+const showReport = ref(false)
+const reportLoading = ref(false)
 
 const changeChartRef = ref()
 const holdersChartRef = ref()
@@ -138,6 +147,31 @@ function selectRow(code: string) {
   selectedCode.value = selectedCode.value === code ? null : code
 }
 
+async function loadStreaks() {
+  try {
+    const res = await api.fetchStreakStats(30, 2)
+    streaks.value = res.streaks
+  } catch {
+    streaks.value = []
+  }
+}
+
+function openStockDetail(code: string, name: string) {
+  detailCode.value = code
+  detailName.value = name
+}
+
+async function loadReport() {
+  if (!date.value) return
+  reportLoading.value = true
+  try {
+    report.value = await api.fetchDailyReport(date.value)
+  } catch {
+    report.value = null
+  }
+  reportLoading.value = false
+}
+
 import * as echarts from 'echarts'
 let trendChart: echarts.ECharts | null = null
 
@@ -242,6 +276,8 @@ async function init() {
     changeChartRef.value?.setOption(buildChangeChartOption(data.value.records))
     holdersChartRef.value?.setOption(buildHoldersChartOption(data.value.records))
   }
+  await loadStreaks()
+  await loadReport()
 }
 
 init()
@@ -262,6 +298,24 @@ init()
       <div v-if="toastVisible" class="toast-inline">{{ toastMsg }}</div>
     </div>
 
+    <!-- 每日复盘 -->
+    <template v-if="report && report.sections.length > 0">
+      <div class="report-panel">
+        <div class="report-header" @click="showReport = !showReport" style="cursor:pointer">
+          <span class="section-icon">&#9670;</span> 每日复盘
+          <span class="ct-hint">{{ showReport ? '点击折叠' : '点击展开' }}</span>
+        </div>
+        <div v-if="showReport" class="report-body">
+          <div v-for="section in report.sections" :key="section.title" class="report-section">
+            <div class="report-section-title">{{ section.title }}</div>
+            <div v-for="item in section.items" :key="item.text" class="report-item" :class="'report-' + item.type">
+              {{ item.text }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
     <EmptyState v-if="!data && !loading" />
 
     <template v-if="data">
@@ -279,6 +333,7 @@ init()
           :rank-change="data.prev_records.some(p => p.stock_code === r.stock_code)
             ? getRankChange(r.stock_code, data.records, data.prev_records)
             : ''"
+          @stock-click="openStockDetail"
         />
       </div>
 
@@ -311,6 +366,7 @@ init()
               >
                 <td class="ct-stock" @click.stop>
                   <span class="ct-name">{{ row.name }}</span>
+                  <button class="info-btn" title="查看详情" @click.stop="openStockDetail(row.code, row.name)">&#9432;</button>
                   <button
                     class="ct-chart-btn"
                     :class="{ active: selectedCode === row.code }"
@@ -377,6 +433,55 @@ init()
         <ChartBox ref="changeChartRef" title="涨跌幅排行" />
         <ChartBox ref="holdersChartRef" title="持仓人数对比" />
       </div>
+
+      <!-- 连板追踪 -->
+      <template v-if="streaks.length > 0">
+        <div class="section-title streak-title" @click="showStreaks = !showStreaks" style="cursor:pointer">
+          <span class="section-icon">&#9670;</span> 连板追踪 ({{ streaks.length }})
+          <span class="ct-hint">{{ showStreaks ? '点击折叠' : '点击展开' }}</span>
+        </div>
+        <div v-if="showStreaks" class="compare-table-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th class="ct-stock">股票</th>
+                <th>连板天数</th>
+                <th>排名趋势</th>
+                <th>最新涨跌</th>
+                <th>板块</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in streaks" :key="s.stock_code">
+                <td class="ct-stock">
+                  <span class="ct-name">{{ s.stock_name }}</span>
+                  <span class="lhb-code">{{ s.stock_code }}</span>
+                  <span v-if="s.is_dark_horse" class="badge badge-new">黑马</span>
+                </td>
+                <td class="streak-days">{{ s.streak_days }}天</td>
+                <td>
+                  <span :class="s.rank_trend === 'rising' ? 'ct-up' : s.rank_trend === 'falling' ? 'ct-down' : ''">
+                    {{ s.rank_trend === 'rising' ? '&#9650; 上升' : s.rank_trend === 'falling' ? '&#9660; 下降' : '&#9644; 稳定' }}
+                  </span>
+                </td>
+                <td :class="(s.latest_change ?? 0) >= 0 ? 'ct-up' : 'ct-down'">
+                  {{ s.latest_change != null ? (s.latest_change >= 0 ? '+' : '') + s.latest_change + '%' : '-' }}
+                </td>
+                <td>
+                  <span v-for="tag in s.sector_tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </template>
+
+    <StockDetail
+      v-if="detailCode"
+      :stock-code="detailCode"
+      :stock-name="detailName"
+      @close="detailCode = null"
+    />
   </div>
 </template>

@@ -65,7 +65,7 @@ pytest -v  # 详细输出
 - **`backend/ocr.py`** — 核心解析逻辑。`ocr_image()` 调百度 OCR API（httpx 同步）；`parse_ocr_text()` 用"中文名+热度值(w)"锚点定位，不依赖排名数字。`KNOWN_SECTORS` 硬编码板块关键词列表。
 - **`backend/crawler.py`** — 顽主杯数据爬虫。从 `api.hunanwanzhu.com` 爬取股票热榜和收益数据，映射到数据库字段后写入。`is_trade_day()` 含 2026 年节假日/调休日历。使用 `upsert_records` 支持重复执行。
 - **`backend/lhb_crawler.py`** — 东方财富龙虎榜爬虫。从 `datacenter-web.eastmoney.com` 抓取龙虎榜日汇总和营业部买卖明细，识别境外机构/机构密集信号股，获取个股概念板块标签。
-- **`backend/database.py`** — SQLite 封装。表：`stock_records`（主数据）、`season_daily_stats`（赛季每日盈亏）、`seasons`（命名时间范围）、`lhb_records`（龙虎榜日汇总）、`lhb_trading_desk`（营业部买卖明细）、`lhb_signals`（信号股）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。
+- **`backend/database.py`** — SQLite 封装。表：`stock_records`（主数据）、`season_daily_stats`（赛季每日盈亏）、`seasons`（命名时间范围）、`lhb_records`（龙虎榜日汇总）、`lhb_trading_desk`（营业部买卖明细）、`lhb_signals`（信号股）、`lhb_pool`（股池追踪，含 d1-d30 涨跌幅跟踪）。每次操作新建连接（`_get_conn`）。`_init_db()` 含 `ALTER TABLE` 做字段迁移。所有 upsert 操作使用 `COALESCE` 保护已有数据不被 NULL 覆盖。`_is_st()` 过滤 ST 股票。
 - **`backend/models.py`** — Pydantic v2 模型。`StockRecord`（14 字段含 `total_fund`）、`StockRecordResponse`、`UploadResult`、`DateInfo`。
 - **`backend/config.py`** — `pydantic-settings` 从 `.env` 加载，路径默认相对于项目根目录。
 - **`crawl.py`** — 顽主杯爬虫入口脚本，支持 `python crawl.py [YYYY-MM-DD]`。
@@ -76,8 +76,8 @@ pytest -v  # 详细输出
 
 `frontend_legacy/` 保留了旧版 vanilla JS 前端作为备份，当前使用 `frontend/` 目录。
 
-- **路由**：`/preview`（只读）和 `/admin`（含上传功能），通过 Vue Router meta + provide/inject 传递 `isAdmin`。
-- **视图**：`DailyView`（日报 Top10 卡片 + 近5日对比表格 + 趋势折线图）、`PnlView`（赛季盈亏走势 + 仓位百分比）、`RangeView`（跨日分析）、`LhbView`（龙虎榜信号股 + 板块分析）。
+- **路由**：`/preview`（只读）和 `/admin`（含上传功能），通过 Vue Router meta + provide/inject 传递 `isAdmin`。默认视图为日报。
+- **视图**：`DailyView`（日报 Top10 卡片 + 近5日对比表格 + 趋势折线图）、`PnlView`（赛季盈亏走势 + 仓位百分比）、`RangeView`（跨日分析）、`LhbView`（龙虎榜信号股 + 营业部明细展开 + 板块分析 + 股池追踪）。
 - **组件**：`StockCard`、`UploadArea`、`ConfirmModal`、`ChartBox`、`TimeFilter`、`EmptyState`。
 - **Composables**：`useApi`（类型化 fetch）、`useChart`（ECharts 生命周期）。
 - **Charts**（`frontend/src/charts/`）：图表模块，共享暗色主题（`theme.ts`）。
@@ -91,6 +91,17 @@ pytest -v  # 详细输出
 - **数据双入口**：OCR 手动上传和 API 自动爬取都可以写入数据，`upsert_records` 处理冲突。
 - **Admin vs Preview 角色**：纯 URL 路径区分，无认证。`/admin` 可上传和录入数据，`/preview` 只读。
 - **红涨绿跌**：中国市场惯例，CSS 和图表配色一致使用。
+- **COALESCE 保护**：所有 upsert 操作用 `COALESCE(excluded.field, existing.field)` 确保新数据为 NULL 时不覆盖已有值，特别用于股池信号同步不覆盖跟踪数据。
+- **排除 ST 股**：数据库 `_is_st()` 方法和爬虫层面都过滤 ST 和非 A 股。
+- **异步后台任务**：股池更新等耗时操作通过 `run_in_executor` 后台执行，前端轮询状态端点获取进度。
+
+## 龙虎榜股池追踪
+
+信号股产生后自动进入股池追踪系统：
+1. 每次爬取龙虎榜时，信号股通过 `sync_lhb_pool_signals()` 同步到 `lhb_pool` 表（仅更新名称/价格/板块，不覆盖跟踪数据）
+2. 股池更新通过 `POST /api/lhb/pool/update` 触发，后台异步执行，前端轮询 `GET /api/lhb/pool/status` 获取进度
+3. `update_lhb_pool()` 获取未完成跟踪的记录（tracking_days < 30），从东方财富 API 拉取最新价格计算 d1-d30 涨跌幅
+4. 股池查询按 `stock_code` 合并去重，只展示近 30 天内有上榜的股票，排除 ST 股
 
 ## 龙虎榜信号股规则
 
@@ -143,6 +154,12 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/season-stats/dates` | 赛季数据所有日期列表 |
 | GET/POST/PUT | `/api/seasons` | 赛季 CRUD（列表 / 创建 / 更新） |
 | POST | `/api/crawl` | 手动触发顽主杯爬虫 |
-| POST | `/api/crawl-lhb` | 手动触发龙虎榜爬虫 |
+| POST | `/api/crawl-lhb?date=` | 手动触发龙虎榜爬虫（可选指定日期） |
+| POST | `/api/crawl-lhb-batch?start_date=&end_date=` | 批量抓取龙虎榜 |
 | GET | `/api/lhb/signals?date=` | 查询龙虎榜信号股（境外机构/机构密集） |
+| GET | `/api/lhb/signal-dates` | 信号股所有日期列表 |
+| GET | `/api/lhb/trading-desk?date=&stock_code=` | 指定股票买卖营业部明细 |
 | GET | `/api/lhb/analysis?months=3` | 龙虎榜板块分析（按月统计） |
+| GET | `/api/lhb/pool?signal_type=` | 股池查询（近30天上榜，按 stock_code 合并去重） |
+| GET | `/api/lhb/pool/status` | 股池后台更新状态 |
+| POST | `/api/lhb/pool/update` | 触发股池数据更新（后台异步，轮询 status 查进度） |
