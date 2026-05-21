@@ -7,6 +7,10 @@ import type {
   LhbAnalysis,
   LhbTradingDesk,
   LhbPoolItem,
+  StreakResponse,
+  StockDetailResponse,
+  DailyReportResponse,
+  BacktestResponse,
 } from '../types'
 
 async function request<T>(urlOrInit: string | (RequestInit & { url: string })): Promise<T> {
@@ -91,5 +95,23 @@ export function useApi() {
 
     getLhbPoolStatus: () =>
       request<{ running: boolean; last_result: { finished_at?: string; updated?: number; skipped?: number; remaining?: number; error?: string } | null }>({ url: '/api/lhb/pool/status' }),
+
+    fetchStreakStats: (days: number = 30, minStreak: number = 2) =>
+      request<StreakResponse>(`/api/stats/streak?days=${days}&min_streak=${minStreak}`),
+
+    fetchStockHistory: (code: string) =>
+      request<StockDetailResponse>(`/api/stocks/${code}/history`),
+
+    fetchDailyReport: (targetDate: string) =>
+      request<DailyReportResponse>(`/api/reports/daily?date=${targetDate}`),
+
+    fetchBacktest: (params?: { signal_type?: string; months?: number; group_by?: string }) => {
+      const qs = new URLSearchParams()
+      if (params?.signal_type) qs.set('signal_type', params.signal_type)
+      if (params?.months) qs.set('months', String(params.months))
+      if (params?.group_by) qs.set('group_by', params.group_by)
+      const s = qs.toString()
+      return request<BacktestResponse>(`/api/lhb/backtest${s ? '?' + s : ''}`)
+    },
   }
 }

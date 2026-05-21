@@ -90,3 +90,110 @@ export interface LhbPoolItem {
   latest_date: string | null
   tracking_days: number
 }
+
+// 连板统计
+export interface StreakItem {
+  stock_code: string
+  stock_name: string
+  streak_days: number
+  dates: string[]
+  ranks: number[]
+  heat_values: (number | null)[]
+  rank_trend: 'rising' | 'stable' | 'falling'
+  is_dark_horse: boolean
+  latest_change: number | null
+  sector_tags: string[]
+}
+
+export interface StreakResponse {
+  start_date: string
+  end_date: string
+  streaks: StreakItem[]
+}
+
+// 个股详情
+export interface StockHistoryRecord {
+  date: string
+  rank: number
+  heat_value: number | null
+  price_change_pct: number | null
+  turnover_amount: number | null
+  holders_today: number | null
+  sector_tags: string[]
+}
+
+export interface StockLhbSignal {
+  date: string
+  signal_type: string
+  close_price: number | null
+  change_rate: number | null
+  net_amt: number | null
+  concept_tags: string[]
+}
+
+export interface StockLhbDesk {
+  date: string
+  side: 'buy' | 'sell'
+  dept_name: string
+  buy_amt: number | null
+  sell_amt: number | null
+  net_amt: number | null
+}
+
+export interface StockDetailResponse {
+  stock_code: string
+  stock_name: string
+  records: StockHistoryRecord[]
+  lhb_signals: StockLhbSignal[]
+  lhb_trading_desk: StockLhbDesk[]
+}
+
+// 每日复盘报告
+export interface ReportItem {
+  type: string
+  text: string
+}
+
+export interface ReportSection {
+  title: string
+  items: ReportItem[]
+}
+
+export interface DailyReportResponse {
+  date: string
+  sections: ReportSection[]
+}
+
+// 胜率回测
+export interface BacktestPeriodStat {
+  period: string
+  count: number
+  win_rate: number
+  avg_change: number
+  median_change: number | null
+  max_change: number | null
+  min_change: number | null
+}
+
+export interface BacktestHorizonStat {
+  horizon: string
+  win_rate: number
+  avg_change: number
+}
+
+export interface BacktestSectorStat {
+  sector: string
+  count: number
+  win_rate: number
+  avg_change: number
+}
+
+export interface BacktestResponse {
+  signal_type: string
+  total_signals: number
+  overall_win_rate: number
+  overall_avg_change: number
+  period_stats: BacktestPeriodStat[]
+  horizon_stats: BacktestHorizonStat[]
+  sector_stats: BacktestSectorStat[]
+}
