@@ -431,3 +431,145 @@ async def trigger_lhb_pool_update():
 
     asyncio.get_running_loop().run_in_executor(None, _run)
     return {"status": "started", "message": "股池更新已启动，后台执行中..."}
+
+
+# ---- 连板统计 / 个股历史 / 日报 / 回测 ----
+
+@app.get("/api/stats/streak")
+async def get_streak_stats(days: int = 30, min_streak: int = 2):
+    """连续上榜统计。"""
+    return db.query_streak_stats(days, min_streak)
+
+
+@app.get("/api/stocks/{code}/history")
+async def get_stock_history(code: str):
+    """查询单只股票的历史数据（stock_records + lhb_signals + lhb_trading_desk）。"""
+    result = db.query_stock_history(code)
+    if not result["records"] and not result["lhb_signals"] and not result["lhb_trading_desk"]:
+        raise HTTPException(404, "该股票无记录")
+    return result
+
+
+@app.get("/api/reports/daily")
+async def daily_report(date_str: str = ""):
+    """每日汇总报告。未传 date 取最近有数据的日期。"""
+    from datetime import date as date_cls
+
+    # 0. 未传 date 则取最近有数据的日期
+    target_date = date_str
+    if not target_date:
+        all_dates = db.get_all_dates()
+        if not all_dates:
+            return {"date": "", "sections": []}
+        target_date = all_dates[0]
+
+    # 1. 查当天和前一天 stock_records
+    rows = db.query_by_date(target_date)
+    for row in rows:
+        if row.get("sector_tags"):
+            row["sector_tags"] = json.loads(row["sector_tags"])
+
+    # 当天无数据返回空 sections
+    if not rows:
+        return {"date": target_date, "sections": []}
+
+    all_dates = db.get_all_dates()
+    prev_date = ""
+    for d in all_dates:
+        if d < target_date:
+            prev_date = d
+            break
+    prev_rows = db.query_by_date(prev_date)
+    for row in prev_rows:
+        if row.get("sector_tags"):
+            row["sector_tags"] = json.loads(row["sector_tags"])
+
+    sections: list[dict] = []
+
+    # 3. Top3 变动（新进/上升/退出）
+    top3_items = []
+    prev_codes = {r["stock_code"]: r["rank"] for r in prev_rows}
+    curr_codes = {r["stock_code"]: r["rank"] for r in rows}
+    for r in rows[:3]:
+        code = r["stock_code"]
+        if code not in prev_codes:
+            top3_items.append({"type": "NEW", "text": f"{r['stock_name']}(#{r['rank']}) 新进Top3"})
+        elif prev_codes[code] > r["rank"]:
+            top3_items.append({"type": "UP", "text": f"{r['stock_name']}(#{r['rank']}) 从第{prev_codes[code]}名上升"})
+        else:
+            top3_items.append({"type": "STABLE", "text": f"{r['stock_name']}(#{r['rank']}) 保持Top3"})
+    for r in prev_rows[:3]:
+        if r["stock_code"] not in curr_codes:
+            top3_items.append({"type": "EXIT", "text": f"{r['stock_name']}(#{r['rank']}) 退出Top3"})
+    if top3_items:
+        sections.append({"title": "Top3 变动", "items": top3_items})
+
+    # 4. 连板追踪
+    streak_result = db.query_streak_stats(days=30, min_streak=2)
+    streak_items = []
+    for s in streak_result.get("streaks", []):
+        mark = "[DARK_HORSE]" if s["is_dark_horse"] else "[STREAK]"
+        trend = {"rising": "上升", "stable": "平稳", "falling": "下降"}.get(s["rank_trend"], "")
+        streak_items.append({
+            "type": "STREAK",
+            "text": f"{mark} {s['stock_name']}({s['stock_code']}) 连续{s['streak_days']}天 "
+                    f"排名{trend} ({s['first_rank']}->{s['last_rank']})",
+        })
+    if streak_items:
+        sections.append({"title": "连板追踪", "items": streak_items})
+
+    # 5. 龙虎榜信号
+    lhb_signals = db.query_lhb_signals(target_date)
+    for sig in lhb_signals:
+        if sig.get("concept_tags"):
+            sig["concept_tags"] = json.loads(sig["concept_tags"])
+    signal_items = []
+    for sig in lhb_signals:
+        mark = "[FOREIGN]" if sig["signal_type"] == "foreign" else "[INST]"
+        signal_items.append({
+            "type": sig["signal_type"].upper(),
+            "text": f"{mark} {sig['stock_name']}({sig['stock_code']}) "
+                    f"净买入{sig.get('net_amt', 0):.0f}万",
+        })
+    if signal_items:
+        sections.append({"title": "龙虎榜信号", "items": signal_items})
+
+    # 6. 板块热度变化
+    sector_change: dict[str, dict] = {}
+    for row in prev_rows:
+        tags = row.get("sector_tags", [])
+        for tag in tags:
+            if tag not in sector_change:
+                sector_change[tag] = {"prev_count": 0, "curr_count": 0}
+            sector_change[tag]["prev_count"] += 1
+    for row in rows:
+        tags = row.get("sector_tags", [])
+        for tag in tags:
+            if tag not in sector_change:
+                sector_change[tag] = {"prev_count": 0, "curr_count": 0}
+            sector_change[tag]["curr_count"] += 1
+
+    hot_items = []
+    for tag, info in sector_change.items():
+        diff = info["curr_count"] - info["prev_count"]
+        if diff > 0:
+            hot_items.append({
+                "type": "HOT",
+                "text": f"[HOT] {tag} {info['prev_count']}->{info['curr_count']} (+{diff})",
+            })
+        elif diff < 0:
+            hot_items.append({
+                "type": "COOL",
+                "text": f"[COOL] {tag} {info['prev_count']}->{info['curr_count']} ({diff})",
+            })
+    hot_items.sort(key=lambda x: abs(int(x["text"].split("(")[1].rstrip(")"))), reverse=True)
+    if hot_items:
+        sections.append({"title": "板块热度变化", "items": hot_items})
+
+    return {"date": target_date, "sections": sections}
+
+
+@app.get("/api/lhb/backtest")
+async def get_backtest(signal_type: str = "", months: int = 3, group_by: str = "month"):
+    """龙虎榜回测统计。"""
+    return db.query_backtest(signal_type, months, group_by)
