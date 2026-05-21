@@ -556,13 +556,17 @@ async def daily_report(date_str: str = ""):
             hot_items.append({
                 "type": "HOT",
                 "text": f"[HOT] {tag} {info['prev_count']}->{info['curr_count']} (+{diff})",
+                "_diff": diff,
             })
         elif diff < 0:
             hot_items.append({
                 "type": "COOL",
                 "text": f"[COOL] {tag} {info['prev_count']}->{info['curr_count']} ({diff})",
+                "_diff": diff,
             })
-    hot_items.sort(key=lambda x: abs(int(x["text"].split("(")[1].rstrip(")"))), reverse=True)
+    hot_items.sort(key=lambda x: abs(x["_diff"]), reverse=True)
+    for item in hot_items:
+        del item["_diff"]
     if hot_items:
         sections.append({"title": "板块热度变化", "items": hot_items})
 

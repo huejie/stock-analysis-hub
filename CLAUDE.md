@@ -77,8 +77,8 @@ pytest -v  # 详细输出
 `frontend_legacy/` 保留了旧版 vanilla JS 前端作为备份，当前使用 `frontend/` 目录。
 
 - **路由**：`/preview`（只读）和 `/admin`（含上传功能），通过 Vue Router meta + provide/inject 传递 `isAdmin`。默认视图为日报。
-- **视图**：`DailyView`（日报 Top10 卡片 + 近5日对比表格 + 趋势折线图）、`PnlView`（赛季盈亏走势 + 仓位百分比）、`RangeView`（跨日分析）、`LhbView`（龙虎榜信号股 + 营业部明细展开 + 板块分析 + 股池追踪）。
-- **组件**：`StockCard`、`UploadArea`、`ConfirmModal`、`ChartBox`、`TimeFilter`、`EmptyState`。
+- **视图**：`DailyView`（日报 Top10 卡片 + 连板追踪 + 复盘报告面板 + 近5日对比表格 + 趋势折线图）、`PnlView`（赛季盈亏走势 + 仓位百分比）、`RangeView`（跨日分析）、`LhbView`（龙虎榜信号股 + 营业部明细展开 + 板块分析 + 股池追踪 + 胜率回测）。
+- **组件**：`StockCard`、`StockDetail`（个股详情弹窗，含排名趋势折线图+龙虎榜关联）、`UploadArea`、`ConfirmModal`、`ChartBox`、`TimeFilter`、`EmptyState`。
 - **Composables**：`useApi`（类型化 fetch）、`useChart`（ECharts 生命周期）。
 - **Charts**（`frontend/src/charts/`）：图表模块，共享暗色主题（`theme.ts`）。
 - **CSS**：暗色主题 + 玻璃态导航栏，金银铜排名徽章，红涨绿跌（中国市场惯例），响应式断点 900px/600px。
@@ -160,6 +160,10 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/lhb/signal-dates` | 信号股所有日期列表 |
 | GET | `/api/lhb/trading-desk?date=&stock_code=` | 指定股票买卖营业部明细 |
 | GET | `/api/lhb/analysis?months=3` | 龙虎榜板块分析（按月统计） |
+| GET | `/api/stats/streak?days=&min_streak=` | 热榜连板统计（连续上榜天数、黑马追踪） |
+| GET | `/api/stocks/{code}/history` | 个股热榜历史 + 龙虎榜关联数据 |
+| GET | `/api/reports/daily?date=` | 每日复盘报告（Top3变动+连板+信号+板块） |
+| GET | `/api/lhb/backtest?signal_type=&months=&group_by=` | 信号股胜率回测（按月/按板块） |
 | GET | `/api/lhb/pool?signal_type=` | 股池查询（近30天上榜，按 stock_code 合并去重） |
 | GET | `/api/lhb/pool/status` | 股池后台更新状态 |
 | POST | `/api/lhb/pool/update` | 触发股池数据更新（后台异步，轮询 status 查进度） |

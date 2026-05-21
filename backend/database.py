@@ -608,7 +608,8 @@ class Database:
 
             # 获取所有记录按 stock_code 分组
             rows = conn.execute(
-                "SELECT date, rank, stock_code, stock_name, sector_tags "
+                "SELECT date, rank, stock_code, stock_name, sector_tags, "
+                "heat_value, price_change_pct "
                 "FROM stock_records WHERE date BETWEEN ? AND ? ORDER BY date DESC",
                 (start_str, end_str),
             ).fetchall()
@@ -627,6 +628,8 @@ class Database:
                 "date": row["date"],
                 "rank": row["rank"],
                 "sector_tags": row["sector_tags"],
+                "heat_value": row["heat_value"],
+                "price_change_pct": row["price_change_pct"],
             })
 
         streaks = []
@@ -670,14 +673,24 @@ class Database:
             except (json.JSONDecodeError, TypeError):
                 sector_tags = []
 
+            streak_dates = [td for td in trade_dates[:streak_days] if td in rec_by_date]
+            streak_ranks = [rec_by_date[td]["rank"] for td in streak_dates]
+            streak_heat = [rec_by_date[td].get("heat_value") for td in streak_dates]
+            latest_change = None
+            if streak_dates:
+                latest_rec = rec_by_date[streak_dates[0]]
+                latest_change = latest_rec.get("price_change_pct")
+
             streaks.append({
                 "stock_code": code,
                 "stock_name": info["stock_name"],
                 "streak_days": streak_days,
+                "dates": streak_dates,
+                "ranks": streak_ranks,
+                "heat_values": streak_heat,
                 "rank_trend": rank_trend,
                 "is_dark_horse": is_dark_horse,
-                "first_rank": first_rank,
-                "last_rank": last_rank,
+                "latest_change": latest_change,
                 "sector_tags": sector_tags,
             })
 
@@ -789,7 +802,7 @@ class Database:
             if values:
                 wins = sum(1 for v in values if v > 0)
                 horizon_stats.append({
-                    "period": field.replace("_change", ""),
+                    "horizon": field.replace("_change", ""),
                     "total": len(values),
                     "win_count": wins,
                     "win_rate": round(wins / len(values), 4),
@@ -797,7 +810,7 @@ class Database:
                 })
             else:
                 horizon_stats.append({
-                    "period": field.replace("_change", ""),
+                    "horizon": field.replace("_change", ""),
                     "total": 0,
                     "win_count": 0,
                     "win_rate": None,
@@ -830,7 +843,7 @@ class Database:
                 wins = sum(1 for v in changes if v > 0)
                 sorted_changes = sorted(changes)
                 period_stats.append({
-                    "key": month_key,
+                    "period": month_key,
                     "count": len(group),
                     "win_rate": round(wins / len(changes), 4),
                     "avg_change": round(sum(changes) / len(changes), 4),
@@ -840,7 +853,7 @@ class Database:
                 })
             else:
                 period_stats.append({
-                    "key": month_key,
+                    "period": month_key,
                     "count": len(group),
                     "win_rate": None,
                     "avg_change": None,

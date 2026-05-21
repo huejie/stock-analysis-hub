@@ -144,8 +144,10 @@ def test_streak_stats_with_data(db):
     assert s["stock_code"] == "000001"
     assert s["streak_days"] == 3
     assert s["is_dark_horse"] is True
-    assert s["first_rank"] == 5
-    assert s["last_rank"] == 1
+    assert s["ranks"][-1] == 5
+    assert s["ranks"][0] == 1
+    assert len(s["dates"]) == 3
+    assert s["latest_change"] is not None
 
 
 def test_streak_stats_min_streak_filter(db):
