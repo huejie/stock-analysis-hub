@@ -1,5 +1,7 @@
+import json
 import logging
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from backend.config import settings
 
@@ -46,46 +48,6 @@ class Database:
                 conn.execute("ALTER TABLE stock_records ADD COLUMN per_capital_position REAL")
             if "total_fund" not in cols:
                 conn.execute("ALTER TABLE stock_records ADD COLUMN total_fund REAL")
-
-            # lhb_trading_desk: 迁移添加 seat_index 字段并更新 UNIQUE 约束
-            td_cols = {r[1] for r in conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()}
-            if "seat_index" not in td_cols:
-                conn.execute("ALTER TABLE lhb_trading_desk ADD COLUMN seat_index INTEGER NOT NULL DEFAULT 0")
-            # 检查UNIQUE约束是否包含seat_index（旧约束是 date,stock_code,side,dept_name）
-            # SQLite不支持ALTER约束，需要重建表
-            idx_cols = set()
-            for idx_row in conn.execute("PRAGMA index_list(lhb_trading_desk)").fetchall():
-                if idx_row[3] == 'u':  # unique index
-                    for c in conn.execute(f"PRAGMA index_info({idx_row[1]})").fetchall():
-                        col_name = conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()[c[1] - 1][1] if c[1] > 0 else ''
-                        idx_cols.add(col_name)
-            if 'seat_index' not in idx_cols:
-                logger.info("迁移 lhb_trading_desk: 重建表以更新UNIQUE约束")
-                conn.execute("""
-                    CREATE TABLE lhb_trading_desk_new (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        date TEXT NOT NULL,
-                        stock_code TEXT NOT NULL,
-                        stock_name TEXT NOT NULL,
-                        side TEXT NOT NULL,
-                        seat_index INTEGER NOT NULL DEFAULT 0,
-                        dept_name TEXT NOT NULL,
-                        buy_amt REAL,
-                        sell_amt REAL,
-                        net_amt REAL,
-                        created_at TEXT DEFAULT (datetime('now','localtime')),
-                        UNIQUE(date, stock_code, side, dept_name, seat_index)
-                    )
-                """)
-                conn.execute("""
-                    INSERT OR IGNORE INTO lhb_trading_desk_new
-                    SELECT id, date, stock_code, stock_name, side,
-                           COALESCE(seat_index, 0), dept_name, buy_amt, sell_amt, net_amt, created_at
-                    FROM lhb_trading_desk
-                """)
-                conn.execute("DROP TABLE lhb_trading_desk")
-                conn.execute("ALTER TABLE lhb_trading_desk_new RENAME TO lhb_trading_desk")
-                logger.info("lhb_trading_desk 表迁移完成")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS season_daily_stats (
@@ -147,6 +109,46 @@ class Database:
                     UNIQUE(date, stock_code, side, dept_name, seat_index)
                 )
             """)
+
+            # lhb_trading_desk: 迁移旧表添加 seat_index 字段并更新 UNIQUE 约束
+            td_cols = {r[1] for r in conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()}
+            if "seat_index" not in td_cols:
+                conn.execute("ALTER TABLE lhb_trading_desk ADD COLUMN seat_index INTEGER NOT NULL DEFAULT 0")
+            # 检查UNIQUE约束是否包含seat_index（旧约束是 date,stock_code,side,dept_name）
+            # SQLite不支持ALTER约束，需要重建表
+            idx_cols = set()
+            for idx_row in conn.execute("PRAGMA index_list(lhb_trading_desk)").fetchall():
+                if idx_row[3] == 'u':  # unique index
+                    for c in conn.execute(f"PRAGMA index_info({idx_row[1]})").fetchall():
+                        col_name = conn.execute("PRAGMA table_info(lhb_trading_desk)").fetchall()[c[1] - 1][1] if c[1] > 0 else ''
+                        idx_cols.add(col_name)
+            if 'seat_index' not in idx_cols:
+                logger.info("迁移 lhb_trading_desk: 重建表以更新UNIQUE约束")
+                conn.execute("""
+                    CREATE TABLE lhb_trading_desk_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
+                        stock_name TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        seat_index INTEGER NOT NULL DEFAULT 0,
+                        dept_name TEXT NOT NULL,
+                        buy_amt REAL,
+                        sell_amt REAL,
+                        net_amt REAL,
+                        created_at TEXT DEFAULT (datetime('now','localtime')),
+                        UNIQUE(date, stock_code, side, dept_name, seat_index)
+                    )
+                """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO lhb_trading_desk_new
+                    SELECT id, date, stock_code, stock_name, side,
+                           COALESCE(seat_index, 0), dept_name, buy_amt, sell_amt, net_amt, created_at
+                    FROM lhb_trading_desk
+                """)
+                conn.execute("DROP TABLE lhb_trading_desk")
+                conn.execute("ALTER TABLE lhb_trading_desk_new RENAME TO lhb_trading_desk")
+                logger.info("lhb_trading_desk 表迁移完成")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS lhb_signals (
@@ -577,3 +579,315 @@ class Database:
                 "SELECT * FROM lhb_pool WHERE tracking_days < 30 ORDER BY tracking_days ASC, signal_date DESC"
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ---- 连板统计 / 个股历史 / 回测 ----
+
+    def query_streak_stats(self, days: int = 30, min_streak: int = 2) -> dict:
+        """统计指定天数内连续上榜的股票。
+
+        从最近交易日往前遍历，计算每只股票的连续上榜天数。
+        rank_trend: 最近3个排名趋势 rising/stable/falling。
+        is_dark_horse: 最早排名 >= 5 且最新排名 <= 3。
+        """
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days - 1)
+        start_str = start_date.isoformat()
+        end_str = end_date.isoformat()
+
+        with self._get_conn() as conn:
+            # 获取日期范围内所有交易日（降序）
+            trade_dates = [
+                r["date"] for r in conn.execute(
+                    "SELECT DISTINCT date FROM stock_records "
+                    "WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+                    (start_str, end_str),
+                ).fetchall()
+            ]
+            if not trade_dates:
+                return {"start_date": start_str, "end_date": end_str, "streaks": []}
+
+            # 获取所有记录按 stock_code 分组
+            rows = conn.execute(
+                "SELECT date, rank, stock_code, stock_name, sector_tags "
+                "FROM stock_records WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+                (start_str, end_str),
+            ).fetchall()
+
+        # 按 stock_code 分组
+        code_map: dict[str, dict] = {}
+        for row in rows:
+            code = row["stock_code"]
+            if code not in code_map:
+                code_map[code] = {
+                    "stock_code": code,
+                    "stock_name": row["stock_name"],
+                    "records": [],
+                }
+            code_map[code]["records"].append({
+                "date": row["date"],
+                "rank": row["rank"],
+                "sector_tags": row["sector_tags"],
+            })
+
+        streaks = []
+        for code, info in code_map.items():
+            # 按日期降序排列（已在 SQL 中排序）
+            recs = info["records"]
+            rec_dates = {r["date"] for r in recs}
+            rec_by_date = {r["date"]: r for r in recs}
+
+            # 从最近交易日往前遍历，计算连续天数
+            streak_days = 0
+            for td in trade_dates:
+                if td in rec_dates:
+                    streak_days += 1
+                else:
+                    break
+
+            if streak_days < min_streak:
+                continue
+
+            # 最近3个排名趋势
+            recent_ranks = [rec_by_date[td]["rank"] for td in trade_dates[:3] if td in rec_by_date]
+            rank_trend = "stable"
+            if len(recent_ranks) >= 2:
+                first, last = recent_ranks[0], recent_ranks[-1]
+                if last > first:
+                    rank_trend = "rising"
+                elif last < first:
+                    rank_trend = "falling"
+
+            # 判断是否黑马（最早排名 >= 5 且最新排名 <= 3）
+            streak_recs = [rec_by_date[td] for td in trade_dates[:streak_days] if td in rec_by_date]
+            first_rank = streak_recs[-1]["rank"] if streak_recs else 0
+            last_rank = streak_recs[0]["rank"] if streak_recs else 0
+            is_dark_horse = first_rank >= 5 and last_rank <= 3
+
+            # 解析 sector_tags JSON
+            sector_tags_raw = recs[0].get("sector_tags", "[]")
+            try:
+                sector_tags = json.loads(sector_tags_raw) if sector_tags_raw else []
+            except (json.JSONDecodeError, TypeError):
+                sector_tags = []
+
+            streaks.append({
+                "stock_code": code,
+                "stock_name": info["stock_name"],
+                "streak_days": streak_days,
+                "rank_trend": rank_trend,
+                "is_dark_horse": is_dark_horse,
+                "first_rank": first_rank,
+                "last_rank": last_rank,
+                "sector_tags": sector_tags,
+            })
+
+        streaks.sort(key=lambda x: x["streak_days"], reverse=True)
+        return {"start_date": start_str, "end_date": end_str, "streaks": streaks}
+
+    def query_stock_history(self, stock_code: str) -> dict:
+        """查询单只股票的全部历史数据（stock_records + lhb_signals + lhb_trading_desk）。"""
+        with self._get_conn() as conn:
+            stock_rows = conn.execute(
+                "SELECT * FROM stock_records WHERE stock_code = ? ORDER BY date DESC",
+                (stock_code,),
+            ).fetchall()
+
+            signal_rows = conn.execute(
+                "SELECT * FROM lhb_signals WHERE stock_code = ? ORDER BY date DESC",
+                (stock_code,),
+            ).fetchall()
+
+            desk_rows = conn.execute(
+                "SELECT * FROM lhb_trading_desk WHERE stock_code = ? "
+                "ORDER BY date DESC, side, net_amt DESC",
+                (stock_code,),
+            ).fetchall()
+
+        records = []
+        stock_name = ""
+        for r in stock_rows:
+            d = dict(r)
+            if not stock_name:
+                stock_name = d["stock_name"]
+            if d.get("sector_tags"):
+                try:
+                    d["sector_tags"] = json.loads(d["sector_tags"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            records.append(d)
+
+        signals = []
+        for r in signal_rows:
+            d = dict(r)
+            if not stock_name:
+                stock_name = d["stock_name"]
+            if d.get("concept_tags"):
+                try:
+                    d["concept_tags"] = json.loads(d["concept_tags"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            signals.append(d)
+
+        desks = []
+        for r in desk_rows:
+            d = dict(r)
+            if not stock_name:
+                stock_name = d["stock_name"]
+            desks.append(d)
+
+        return {
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "records": records,
+            "lhb_signals": signals,
+            "lhb_trading_desk": desks,
+        }
+
+    def query_backtest(self, signal_type: str = "", months: int = 3,
+                       group_by: str = "month") -> dict:
+        """龙虎榜回测统计。
+
+        horizon_stats: 各持仓天数的胜率和平均涨幅。
+        period_stats: 按 month 或 sector 分组的统计。
+        sector_stats: 按概念板块分组的统计。
+        """
+        end_date = date.today()
+        start_date = end_date - timedelta(days=months * 30)
+        start_str = start_date.isoformat()
+        end_str = end_date.isoformat()
+
+        with self._get_conn() as conn:
+            where = "signal_date BETWEEN ? AND ?"
+            params: list = [start_str, end_str]
+            if signal_type:
+                where += " AND signal_type = ?"
+                params.append(signal_type)
+
+            rows = conn.execute(
+                f"SELECT * FROM lhb_pool WHERE {where} ORDER BY signal_date DESC",
+                params,
+            ).fetchall()
+            pool_records = [dict(r) for r in rows]
+
+        total_signals = len(pool_records)
+        if total_signals == 0:
+            return {
+                "signal_type": signal_type,
+                "total_signals": 0,
+                "overall_win_rate": None,
+                "overall_avg_change": None,
+                "period_stats": [],
+                "horizon_stats": [],
+                "sector_stats": [],
+            }
+
+        # horizon_stats: 对各持仓天数计算胜率和平均涨幅
+        horizon_fields = ["d1_change", "d3_change", "d5_change", "d10_change", "d20_change", "d30_change"]
+        horizon_stats = []
+        for field in horizon_fields:
+            values = [r[field] for r in pool_records if r.get(field) is not None]
+            if values:
+                wins = sum(1 for v in values if v > 0)
+                horizon_stats.append({
+                    "period": field.replace("_change", ""),
+                    "total": len(values),
+                    "win_count": wins,
+                    "win_rate": round(wins / len(values), 4),
+                    "avg_change": round(sum(values) / len(values), 4),
+                })
+            else:
+                horizon_stats.append({
+                    "period": field.replace("_change", ""),
+                    "total": 0,
+                    "win_count": 0,
+                    "win_rate": None,
+                    "avg_change": None,
+                })
+
+        # overall_win_rate/overall_avg_change 用 d5_change
+        d5_values = [r["d5_change"] for r in pool_records if r.get("d5_change") is not None]
+        if d5_values:
+            d5_wins = sum(1 for v in d5_values if v > 0)
+            overall_win_rate = round(d5_wins / len(d5_values), 4)
+            overall_avg_change = round(sum(d5_values) / len(d5_values), 4)
+        else:
+            overall_win_rate = None
+            overall_avg_change = None
+
+        # period_stats: 按月分组
+        period_stats = []
+        month_groups: dict[str, list] = {}
+        for r in pool_records:
+            month_key = r["signal_date"][:7]
+            if month_key not in month_groups:
+                month_groups[month_key] = []
+            month_groups[month_key].append(r)
+
+        for month_key in sorted(month_groups.keys()):
+            group = month_groups[month_key]
+            changes = [r["d5_change"] for r in group if r.get("d5_change") is not None]
+            if changes:
+                wins = sum(1 for v in changes if v > 0)
+                sorted_changes = sorted(changes)
+                period_stats.append({
+                    "key": month_key,
+                    "count": len(group),
+                    "win_rate": round(wins / len(changes), 4),
+                    "avg_change": round(sum(changes) / len(changes), 4),
+                    "median_change": sorted_changes[len(sorted_changes) // 2],
+                    "max_change": max(changes),
+                    "min_change": min(changes),
+                })
+            else:
+                period_stats.append({
+                    "key": month_key,
+                    "count": len(group),
+                    "win_rate": None,
+                    "avg_change": None,
+                    "median_change": None,
+                    "max_change": None,
+                    "min_change": None,
+                })
+
+        # sector_stats: 按概念板块分组
+        sector_stats = []
+        sector_groups: dict[str, list] = {}
+        for r in pool_records:
+            tags_raw = r.get("concept_tags", "[]")
+            try:
+                tags = json.loads(tags_raw) if tags_raw else []
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+            for tag in tags:
+                if tag not in sector_groups:
+                    sector_groups[tag] = []
+                sector_groups[tag].append(r)
+
+        for tag in sorted(sector_groups.keys()):
+            group = sector_groups[tag]
+            changes = [r["d5_change"] for r in group if r.get("d5_change") is not None]
+            if changes:
+                wins = sum(1 for v in changes if v > 0)
+                sector_stats.append({
+                    "sector": tag,
+                    "count": len(group),
+                    "win_rate": round(wins / len(changes), 4),
+                    "avg_change": round(sum(changes) / len(changes), 4),
+                })
+            else:
+                sector_stats.append({
+                    "sector": tag,
+                    "count": len(group),
+                    "win_rate": None,
+                    "avg_change": None,
+                })
+
+        return {
+            "signal_type": signal_type,
+            "total_signals": total_signals,
+            "overall_win_rate": overall_win_rate,
+            "overall_avg_change": overall_avg_change,
+            "period_stats": period_stats,
+            "horizon_stats": horizon_stats,
+            "sector_stats": sector_stats,
+        }
