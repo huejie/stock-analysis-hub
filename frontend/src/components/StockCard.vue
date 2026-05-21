@@ -6,6 +6,10 @@ const props = defineProps<{
   isNew?: boolean
   rankChange?: string
 }>()
+
+const emit = defineEmits<{
+  'stock-click': [code: string, name: string]
+}>()
 </script>
 
 <template>
@@ -16,6 +20,7 @@ const props = defineProps<{
         <div class="name-row">
           <span class="name">{{ record.stock_name }}</span>
           <span class="code">{{ record.stock_code }}</span>
+          <button class="info-btn" title="查看详情" @click.stop="emit('stock-click', record.stock_code, record.stock_name)">&#9432;</button>
         </div>
         <div class="badges-row">
           <span v-if="isNew" class="badge badge-new">NEW</span>
