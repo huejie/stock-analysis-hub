@@ -24,12 +24,12 @@ async function load() {
   loading.value = true
   try {
     data.value = await api.fetchStockHistory(props.stockCode)
-    await nextTick()
-    renderChart()
   } catch {
     data.value = null
   }
   loading.value = false
+  await nextTick()
+  renderChart()
 }
 
 function fmtAmt(val: number | null): string {

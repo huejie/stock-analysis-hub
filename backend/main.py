@@ -510,10 +510,13 @@ async def daily_report(date_str: str = ""):
     for s in streak_result.get("streaks", []):
         mark = "[DARK_HORSE]" if s["is_dark_horse"] else "[STREAK]"
         trend = {"rising": "上升", "stable": "平稳", "falling": "下降"}.get(s["rank_trend"], "")
+        ranks = s.get("ranks", [])
+        first_rank = ranks[-1] if ranks else "-"
+        last_rank = ranks[0] if ranks else "-"
         streak_items.append({
             "type": "STREAK",
             "text": f"{mark} {s['stock_name']}({s['stock_code']}) 连续{s['streak_days']}天 "
-                    f"排名{trend} ({s['first_rank']}->{s['last_rank']})",
+                    f"排名{trend} ({first_rank}->{last_rank})",
         })
     if streak_items:
         sections.append({"title": "连板追踪", "items": streak_items})
@@ -526,10 +529,11 @@ async def daily_report(date_str: str = ""):
     signal_items = []
     for sig in lhb_signals:
         mark = "[FOREIGN]" if sig["signal_type"] == "foreign" else "[INST]"
+        net_amt = sig.get("net_amt") or 0
         signal_items.append({
             "type": sig["signal_type"].upper(),
             "text": f"{mark} {sig['stock_name']}({sig['stock_code']}) "
-                    f"净买入{sig.get('net_amt', 0):.0f}万",
+                    f"净买入{net_amt:.0f}万",
         })
     if signal_items:
         sections.append({"title": "龙虎榜信号", "items": signal_items})
