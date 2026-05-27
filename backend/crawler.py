@@ -240,6 +240,71 @@ def _parse_pct(value: str) -> float | None:
         return None
 
 
+def backfill_missing_quotes(db: Database | None = None) -> dict:
+    """扫描数据库中涨跌幅为空的记录，从腾讯K线接口补全。
+
+    Returns:
+        {"total_missing": int, "fixed": int, "still_missing": int}
+    """
+    if db is None:
+        db = Database()
+
+    import sqlite3
+
+    conn = sqlite3.connect(db.db_path)
+    conn.row_factory = sqlite3.Row
+
+    missing_rows = conn.execute(
+        "SELECT id, date, stock_code, stock_name FROM stock_records "
+        "WHERE price_change_pct IS NULL ORDER BY date"
+    ).fetchall()
+    conn.close()
+
+    total = len(missing_rows)
+    if total == 0:
+        logger.info("所有记录涨跌幅已完整，无需补全")
+        return {"total_missing": 0, "fixed": 0, "still_missing": 0}
+
+    logger.info("发现 %d 条缺失涨跌幅记录，开始补全", total)
+
+    # 按日期分组批量拉取
+    by_date: dict[str, list[dict]] = {}
+    for r in missing_rows:
+        d = r["date"]
+        if d not in by_date:
+            by_date[d] = []
+        by_date[d].append({"id": r["id"], "code": r["stock_code"], "name": r["stock_name"]})
+
+    fixed = 0
+    for d, items in sorted(by_date.items()):
+        codes = [it["code"] for it in items]
+        quotes = fetch_quotes(codes, d)
+
+        for it in items:
+            q = quotes.get(it["code"], {})
+            pct = q.get("price_change_pct")
+            turnover = q.get("turnover_amount")
+            action = q.get("price_action")
+
+            if pct is not None:
+                with db._get_conn() as c:
+                    c.execute(
+                        "UPDATE stock_records SET price_change_pct = ?, turnover_amount = COALESCE(?, turnover_amount), "
+                        "price_action = COALESCE(?, price_action) WHERE id = ?",
+                        (pct, turnover, action, it["id"]),
+                    )
+                fixed += 1
+                logger.info("补全 %s %s: 涨跌幅=%.2f%%", d, it["name"], pct)
+            else:
+                logger.warning("仍无法获取 %s %s (%s) 的涨跌幅", d, it["name"], it["code"])
+
+            time.sleep(0.1)
+
+    still = total - fixed
+    logger.info("补全完成: 成功 %d, 仍缺失 %d", fixed, still)
+    return {"total_missing": total, "fixed": fixed, "still_missing": still}
+
+
 def crawl_and_save(db: Database | None = None, target_date: date | None = None) -> dict:
     """主函数：爬取数据并存入数据库。
 
