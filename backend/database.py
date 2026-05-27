@@ -274,19 +274,6 @@ class Database:
                 logger.warning("sector_tags 回填失败 %s: %s", code, e)
         conn.commit()
         logger.info("sector_tags 回填完成: %d 条更新", updated)
-        with self._get_conn() as conn:
-            conn.execute("""
-                INSERT INTO stock_records
-                    (date, rank, stock_name, stock_code, heat_value,
-                     sector_tags, price_change_pct, turnover_amount,
-                     holders_today, holders_yesterday, price_action,
-                     per_capital_pnl, per_capital_position, total_fund)
-                VALUES
-                    (:date, :rank, :stock_name, :stock_code, :heat_value,
-                     :sector_tags, :price_change_pct, :turnover_amount,
-                     :holders_today, :holders_yesterday, :price_action,
-                     :per_capital_pnl, :per_capital_position, :total_fund)
-            """, record)
 
     def insert_records(self, records: list[dict]):
         with self._get_conn() as conn:
