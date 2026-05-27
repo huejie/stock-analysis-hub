@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import sqlite3
 import time
 from datetime import date, timedelta
 
@@ -340,6 +341,32 @@ def crawl_and_save(db: Database | None = None, target_date: date | None = None) 
             logger.info("股票数据入库成功: %d 条", stock_count)
         except Exception as e:
             logger.error("股票数据入库失败: %s", e)
+
+        # 检查涨跌幅缺失，延迟重试一次
+        missing_codes = [
+            r["stock_code"] for r in stock_records if r.get("price_change_pct") is None
+        ]
+        if missing_codes:
+            logger.info("涨跌幅缺失 %d 条，等待30秒后重试", len(missing_codes))
+            time.sleep(30)
+            quotes = fetch_quotes(missing_codes, target_str)
+            retry_fixed = 0
+            with db._get_conn() as conn:
+                for code in missing_codes:
+                    q = quotes.get(code, {})
+                    pct = q.get("price_change_pct")
+                    if pct is not None:
+                        conn.execute(
+                            "UPDATE stock_records SET price_change_pct = ?, "
+                            "turnover_amount = COALESCE(?, turnover_amount), "
+                            "price_action = COALESCE(?, price_action) "
+                            "WHERE date = ? AND stock_code = ?",
+                            (pct, q.get("turnover_amount"), q.get("price_action"), target_str, code),
+                        )
+                        retry_fixed += 1
+                        logger.info("重试补全 %s: %.2f%%", code, pct)
+            if retry_fixed:
+                logger.info("重试补全成功 %d 条", retry_fixed)
     else:
         logger.warning("未获取到股票数据")
 
