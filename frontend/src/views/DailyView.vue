@@ -333,7 +333,6 @@ init()
           :rank-change="data.prev_records.some(p => p.stock_code === r.stock_code)
             ? getRankChange(r.stock_code, data.records, data.prev_records)
             : ''"
-          @stock-click="openStockDetail"
         />
       </div>
 
@@ -366,13 +365,7 @@ init()
               >
                 <td class="ct-stock" @click.stop>
                   <span class="ct-name">{{ row.name }}</span>
-                  <button class="info-btn" title="查看详情" @click.stop="openStockDetail(row.code, row.name)">&#9432;</button>
-                  <button
-                    class="ct-chart-btn"
-                    :class="{ active: selectedCode === row.code }"
-                    title="查看趋势"
-                    @click="selectRow(row.code)"
-                  >&#9650;</button>
+                  <button v-if="row.days.filter(Boolean).length > 1" class="ct-chart-btn" :class="{ active: selectedCode === row.code }" title="查看趋势" @click="selectRow(row.code)"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></button>
                 </td>
                 <td v-for="(day, i) in row.days" :key="i" class="ct-day">
                   <template v-if="day">

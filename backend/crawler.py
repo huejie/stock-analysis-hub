@@ -100,6 +100,12 @@ def fetch_stock_data(date_str: str) -> list[dict]:
     codes = [item["stock_code"] for item in valid_items]
     quotes = fetch_quotes(codes, date_str)
 
+    # 批量获取板块标签
+    from lhb_crawler import fetch_concept_tags
+    sector_cache: dict[str, list[str]] = {}
+    for code in codes:
+        sector_cache[code] = fetch_concept_tags(code)
+
     records = []
     for idx, item in enumerate(valid_items, start=1):
         code = item["stock_code"]
@@ -110,7 +116,7 @@ def fetch_stock_data(date_str: str) -> list[dict]:
             "stock_name": item.get("stock_name", ""),
             "stock_code": code,
             "heat_value": item.get("total_fund"),
-            "sector_tags": json.dumps([], ensure_ascii=False),
+            "sector_tags": json.dumps(sector_cache.get(code, []), ensure_ascii=False),
             "price_change_pct": q.get("price_change_pct"),
             "turnover_amount": q.get("turnover_amount"),
             "holders_today": item.get("count"),

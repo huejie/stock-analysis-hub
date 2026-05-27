@@ -11,7 +11,7 @@ from backend.database import Database
 logger = logging.getLogger("lhb_crawler")
 
 LHB_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-CONCEPT_API = "https://push2.eastmoney.com/api/qt/stock/get"
+CONCEPT_API = "https://push2his.eastmoney.com/api/qt/stock/get"
 TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -166,7 +166,8 @@ def fetch_concept_tags(stock_code: str) -> list[str]:
     try:
         resp = httpx.get(
             CONCEPT_API,
-            params={"secid": f"{prefix}.{stock_code}", "fields": "f127,f129"},
+            params={"secid": f"{prefix}.{stock_code}", "fields": "f127,f129",
+                     "ut": "fa5fd1943c7b386f172d6893dbfba10b"},
             headers=HEADERS,
             timeout=10,
         )

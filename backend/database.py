@@ -7,6 +7,12 @@ from backend.config import settings
 
 logger = logging.getLogger("database")
 
+_SECTOR_API = "https://push2his.eastmoney.com/api/qt/stock/get"
+_SECTOR_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://quote.eastmoney.com/",
+}
+
 
 class Database:
     def __init__(self, db_path: str | None = None):
@@ -206,7 +212,68 @@ class Database:
                         ("第1赛季", row["mn"], row["mx"]),
                     )
 
-    def insert_record(self, record: dict):
+            # 迁移记录表
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS _migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT DEFAULT (datetime('now','localtime'))
+                )
+            """)
+
+            # 回填空 sector_tags
+            mig = conn.execute(
+                "SELECT 1 FROM _migrations WHERE name = 'backfill_sector_tags'"
+            ).fetchone()
+            if not mig:
+                empty_count = conn.execute(
+                    "SELECT COUNT(DISTINCT stock_code) FROM stock_records "
+                    "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = ''"
+                ).fetchone()[0]
+                if empty_count > 0:
+                    logger.info("开始回填 %d 只股票的 sector_tags...", empty_count)
+                    self._backfill_sector_tags(conn)
+                conn.execute(
+                    "INSERT INTO _migrations (name) VALUES ('backfill_sector_tags')"
+                )
+
+    def _backfill_sector_tags(self, conn):
+        """从东方财富 API 回填空 sector_tags。"""
+        import httpx
+        rows = conn.execute(
+            "SELECT DISTINCT stock_code FROM stock_records "
+            "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = ''"
+        ).fetchall()
+        updated = 0
+        for (code,) in rows:
+            prefix = "1" if code[0] == "6" else "0"
+            try:
+                resp = httpx.get(
+                    _SECTOR_API,
+                    params={"secid": f"{prefix}.{code}", "fields": "f127,f129",
+                            "ut": "fa5fd1943c7b386f172d6893dbfba10b"},
+                    headers=_SECTOR_HEADERS,
+                    timeout=10,
+                )
+                data = resp.json().get("data")
+                if not data:
+                    continue
+                tags = []
+                if data.get("f127"):
+                    tags.append(data["f127"])
+                if data.get("f129"):
+                    tags.extend(c.strip() for c in data["f129"].split(",") if c.strip())
+                if tags:
+                    tags_json = json.dumps(tags, ensure_ascii=False)
+                    conn.execute(
+                        "UPDATE stock_records SET sector_tags = ? WHERE stock_code = ? "
+                        "AND (sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = '')",
+                        (tags_json, code),
+                    )
+                    updated += conn.total_changes
+            except Exception as e:
+                logger.warning("sector_tags 回填失败 %s: %s", code, e)
+        conn.commit()
+        logger.info("sector_tags 回填完成: %d 条更新", updated)
         with self._get_conn() as conn:
             conn.execute("""
                 INSERT INTO stock_records

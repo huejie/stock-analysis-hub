@@ -389,10 +389,13 @@ body::before {
     min-height: 16px;
 }
 .info-btn {
-    background: none; border: none; color: #64748b; cursor: pointer;
-    font-size: 0.9em; padding: 0 4px; margin-left: 4px;
+    background: none; border: none;
+    color: rgba(203,213,225,0.7); cursor: pointer;
+    padding: 3px; margin-left: 6px;
+    border-radius: 50%; transition: color 0.2s, background 0.2s;
+    line-height: 0; display: inline-flex; align-items: center; vertical-align: middle;
 }
-.info-btn:hover { color: #3b82f6; }
+.info-btn:hover { color: var(--accent); background: rgba(59,130,246,0.1); }
 
 .stock-card .card-body {
     margin-top: 4px;
@@ -500,29 +503,26 @@ body::before {
     color: var(--text-primary);
 }
 .ct-chart-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    width: 22px; height: 22px;
-    border-radius: 4px;
+    background: none;
+    border: none;
+    color: rgba(203,213,225,0.7);
     cursor: pointer;
-    font-size: 8px;
+    padding: 3px;
+    margin-left: 3px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-left: 6px;
-    transition: var(--transition);
+    transition: color 0.2s, background 0.2s;
     vertical-align: middle;
+    border-radius: 4px;
 }
 .ct-chart-btn:hover {
-    background: var(--accent-glow);
-    border-color: var(--accent);
     color: var(--accent);
+    background: rgba(59,130,246,0.1);
 }
 .ct-chart-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    color: var(--accent);
+    background: rgba(59,130,246,0.15);
 }
 .compare-table td.ct-today {
     background: rgba(59, 130, 246, 0.04);

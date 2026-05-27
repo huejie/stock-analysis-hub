@@ -17,6 +17,7 @@ if project_root not in sys.path:
 
 from backend.crawler import crawl_and_save, backfill_missing_quotes
 from backend.database import Database
+from backend.lhb_crawler import update_lhb_pool
 
 
 def main():
@@ -40,6 +41,14 @@ def main():
             sys.exit(1)
 
     crawl_and_save(db=db, target_date=target_date)
+
+    # 每次爬取后同步更新龙虎榜股池价格
+    try:
+        pool_result = update_lhb_pool(db)
+        if pool_result["updated"] > 0:
+            logging.info("股池价格更新: %d 条", pool_result["updated"])
+    except Exception as e:
+        logging.warning("股池价格更新失败: %s", e)
 
 
 if __name__ == "__main__":
