@@ -433,7 +433,7 @@ async def trigger_lhb_pool_update():
     return {"status": "started", "message": "股池更新已启动，后台执行中..."}
 
 
-# ---- 连板统计 / 个股历史 / 日报 / 回测 ----
+# ---- 连续上榜统计 / 个股历史 / 日报 / 回测 ----
 
 @app.get("/api/stats/streak")
 async def get_streak_stats(days: int = 30, min_streak: int = 2):
@@ -493,33 +493,52 @@ async def daily_report(date_str: str = ""):
     for r in rows[:3]:
         code = r["stock_code"]
         if code not in prev_codes:
-            top3_items.append({"type": "NEW", "text": f"{r['stock_name']}(#{r['rank']}) 新进Top3"})
+            top3_items.append({
+                "type": "TOP3_NEW", "stock_name": r["stock_name"],
+                "stock_code": code, "rank": r["rank"],
+                "text": f"{r['stock_name']}(#{r['rank']}) 新进Top3",
+            })
         elif prev_codes[code] > r["rank"]:
-            top3_items.append({"type": "UP", "text": f"{r['stock_name']}(#{r['rank']}) 从第{prev_codes[code]}名上升"})
+            top3_items.append({
+                "type": "TOP3_UP", "stock_name": r["stock_name"],
+                "stock_code": code, "rank": r["rank"], "prev_rank": prev_codes[code],
+                "text": f"{r['stock_name']}(#{r['rank']}) 从第{prev_codes[code]}名上升",
+            })
         else:
-            top3_items.append({"type": "STABLE", "text": f"{r['stock_name']}(#{r['rank']}) 保持Top3"})
+            top3_items.append({
+                "type": "TOP3_STABLE", "stock_name": r["stock_name"],
+                "stock_code": code, "rank": r["rank"],
+                "text": f"{r['stock_name']}(#{r['rank']}) 保持Top3",
+            })
     for r in prev_rows[:3]:
         if r["stock_code"] not in curr_codes:
-            top3_items.append({"type": "EXIT", "text": f"{r['stock_name']}(#{r['rank']}) 退出Top3"})
+            top3_items.append({
+                "type": "TOP3_EXIT", "stock_name": r["stock_name"],
+                "stock_code": r["stock_code"], "rank": r["rank"],
+                "text": f"{r['stock_name']}(#{r['rank']}) 退出Top3",
+            })
     if top3_items:
         sections.append({"title": "Top3 变动", "items": top3_items})
 
-    # 4. 连板追踪
+    # 4. 连续上榜追踪
     streak_result = db.query_streak_stats(days=30, min_streak=2)
     streak_items = []
     for s in streak_result.get("streaks", []):
-        mark = "[DARK_HORSE]" if s["is_dark_horse"] else "[STREAK]"
-        trend = {"rising": "上升", "stable": "平稳", "falling": "下降"}.get(s["rank_trend"], "")
         ranks = s.get("ranks", [])
-        first_rank = ranks[-1] if ranks else "-"
-        last_rank = ranks[0] if ranks else "-"
+        first_rank = ranks[-1] if ranks else 0
+        last_rank = ranks[0] if ranks else 0
+        item_type = "DARK_HORSE" if s["is_dark_horse"] else "STREAK"
         streak_items.append({
-            "type": "STREAK",
-            "text": f"{mark} {s['stock_name']}({s['stock_code']}) 连续{s['streak_days']}天 "
-                    f"排名{trend} ({first_rank}->{last_rank})",
+            "type": item_type,
+            "stock_name": s["stock_name"], "stock_code": s["stock_code"],
+            "streak_days": s["streak_days"], "rank_trend": s["rank_trend"],
+            "first_rank": first_rank, "last_rank": last_rank,
+            "latest_change": s.get("latest_change"),
+            "text": f"{s['stock_name']}({s['stock_code']}) 连续{s['streak_days']}天 "
+                    f"({first_rank}->{last_rank})",
         })
     if streak_items:
-        sections.append({"title": "连板追踪", "items": streak_items})
+        sections.append({"title": "连续上榜追踪", "items": streak_items})
 
     # 5. 龙虎榜信号
     lhb_signals = db.query_lhb_signals(target_date)
@@ -528,27 +547,29 @@ async def daily_report(date_str: str = ""):
             sig["concept_tags"] = json.loads(sig["concept_tags"])
     signal_items = []
     for sig in lhb_signals:
-        mark = "[FOREIGN]" if sig["signal_type"] == "foreign" else "[INST]"
         net_amt = sig.get("net_amt") or 0
+        item_type = "FOREIGN" if sig["signal_type"] == "foreign" else "INST"
         signal_items.append({
-            "type": sig["signal_type"].upper(),
-            "text": f"{mark} {sig['stock_name']}({sig['stock_code']}) "
+            "type": item_type,
+            "stock_name": sig["stock_name"], "stock_code": sig["stock_code"],
+            "net_amt": net_amt,
+            "change_rate": sig.get("change_rate"),
+            "concept_tags": sig.get("concept_tags", []),
+            "text": f"{sig['stock_name']}({sig['stock_code']}) "
                     f"净买入{net_amt:.0f}万",
         })
     if signal_items:
         sections.append({"title": "龙虎榜信号", "items": signal_items})
 
-    # 6. 板块热度变化
+    # 6. 板块热度变化（降噪：只返回 diff>=2 或 top5）
     sector_change: dict[str, dict] = {}
     for row in prev_rows:
-        tags = row.get("sector_tags", [])
-        for tag in tags:
+        for tag in row.get("sector_tags", []):
             if tag not in sector_change:
                 sector_change[tag] = {"prev_count": 0, "curr_count": 0}
             sector_change[tag]["prev_count"] += 1
     for row in rows:
-        tags = row.get("sector_tags", [])
-        for tag in tags:
+        for tag in row.get("sector_tags", []):
             if tag not in sector_change:
                 sector_change[tag] = {"prev_count": 0, "curr_count": 0}
             sector_change[tag]["curr_count"] += 1
@@ -556,23 +577,28 @@ async def daily_report(date_str: str = ""):
     hot_items = []
     for tag, info in sector_change.items():
         diff = info["curr_count"] - info["prev_count"]
-        if diff > 0:
+        if diff != 0:
             hot_items.append({
-                "type": "HOT",
-                "text": f"[HOT] {tag} {info['prev_count']}->{info['curr_count']} (+{diff})",
-                "_diff": diff,
+                "type": "SECTOR_HOT" if diff > 0 else "SECTOR_COOL",
+                "sector": tag,
+                "prev_count": info["prev_count"],
+                "curr_count": info["curr_count"],
+                "diff": diff,
+                "text": f"{tag} {info['prev_count']}→{info['curr_count']} "
+                        f"({'+' if diff > 0 else ''}{diff})",
             })
-        elif diff < 0:
-            hot_items.append({
-                "type": "COOL",
-                "text": f"[COOL] {tag} {info['prev_count']}->{info['curr_count']} ({diff})",
-                "_diff": diff,
-            })
-    hot_items.sort(key=lambda x: abs(x["_diff"]), reverse=True)
-    for item in hot_items:
-        del item["_diff"]
-    if hot_items:
-        sections.append({"title": "板块热度变化", "items": hot_items})
+    hot_items.sort(key=lambda x: abs(x["diff"]), reverse=True)
+    # 降噪：保留 diff>=2 或排名前 5
+    significant = [it for it in hot_items if abs(it["diff"]) >= 2]
+    top5 = hot_items[:5]
+    seen_sectors = {it["sector"] for it in significant}
+    for it in top5:
+        if it["sector"] not in seen_sectors:
+            significant.append(it)
+            seen_sectors.add(it["sector"])
+    significant.sort(key=lambda x: abs(x["diff"]), reverse=True)
+    if significant:
+        sections.append({"title": "板块热度变化", "items": significant})
 
     return {"date": target_date, "sections": sections}
 

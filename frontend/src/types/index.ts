@@ -91,7 +91,7 @@ export interface LhbPoolItem {
   tracking_days: number
 }
 
-// 连板统计
+// 连续上榜统计
 export interface StreakItem {
   stock_code: string
   stock_name: string
@@ -149,10 +149,47 @@ export interface StockDetailResponse {
 }
 
 // 每日复盘报告
-export interface ReportItem {
-  type: string
+export interface Top3ReportItem {
+  type: 'TOP3_NEW' | 'TOP3_UP' | 'TOP3_STABLE' | 'TOP3_EXIT'
   text: string
+  stock_name: string
+  stock_code: string
+  rank: number
+  prev_rank?: number
 }
+
+export interface StreakReportItem {
+  type: 'STREAK' | 'DARK_HORSE'
+  text: string
+  stock_name: string
+  stock_code: string
+  streak_days: number
+  rank_trend: string
+  first_rank: number
+  last_rank: number
+  latest_change: number | null
+}
+
+export interface LhbReportItem {
+  type: 'FOREIGN' | 'INST'
+  text: string
+  stock_name: string
+  stock_code: string
+  net_amt: number
+  change_rate: number | null
+  concept_tags: string[]
+}
+
+export interface SectorReportItem {
+  type: 'SECTOR_HOT' | 'SECTOR_COOL'
+  text: string
+  sector: string
+  prev_count: number
+  curr_count: number
+  diff: number
+}
+
+export type ReportItem = Top3ReportItem | StreakReportItem | LhbReportItem | SectorReportItem
 
 export interface ReportSection {
   title: string

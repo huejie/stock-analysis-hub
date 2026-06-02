@@ -1144,18 +1144,69 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
 .streak-title .ct-hint { font-size: 0.75em; opacity: 0.5; }
 
 /* ===== Daily Report ===== */
-.report-panel { background: #131b2e; border: 1px solid #1e293b; border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
-.report-header { padding: 12px 16px; font-weight: 700; color: #e2e8f0; border-bottom: 1px solid #1e293b; }
+.report-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+.report-header { padding: 12px 16px; font-weight: 700; color: var(--text-primary); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-summary-badges { display: inline-flex; gap: 5px; margin-left: 4px; }
+.badge-foreign { background: rgba(96,165,250,0.12); color: #60a5fa; border: 1px solid rgba(96,165,250,0.25); }
+.badge-inst { background: rgba(251,191,36,0.12); color: #fbbf24; border: 1px solid rgba(251,191,36,0.25); }
+.badge-sector { background: rgba(167,139,250,0.12); color: #a78bfa; border: 1px solid rgba(167,139,250,0.25); }
+.badge-stable { background: rgba(148,163,184,0.12); color: #94a3b8; }
+.badge-dark-horse { background: rgba(245,158,11,0.15); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
 .report-body { padding: 12px 16px; }
-.report-section { margin-bottom: 12px; }
+.report-section { margin-bottom: 14px; }
 .report-section:last-child { margin-bottom: 0; }
-.report-section-title { font-weight: 600; color: #94a3b8; font-size: 0.85em; margin-bottom: 4px; }
-.report-item { padding: 2px 0; font-size: 0.9em; color: #cbd5e1; }
-.report-new, .report-foreign { color: #ef4444; }
-.report-rise, .report-streak { color: #22c55e; }
-.report-exit { color: #64748b; }
-.report-inst_dense { color: #3b82f6; }
-.report-sector { color: #a78bfa; }
+.report-section-title { font-weight: 600; color: var(--text-muted); font-size: 0.85em; margin-bottom: 8px; letter-spacing: 0.02em; }
+.report-item { padding: 2px 0; font-size: 0.9em; color: var(--text-secondary); }
+
+/* Top3 chips */
+.report-top3-group { padding: 8px 10px; border-radius: 6px; margin-bottom: 6px; }
+.report-top3-group:last-child { margin-bottom: 0; }
+.top3-enter { background: rgba(16,185,129,0.05); border: 1px solid rgba(16,185,129,0.15); }
+.top3-exit { background: rgba(239,68,68,0.04); border: 1px solid rgba(239,68,68,0.1); }
+.top3-group-label { font-size: 11px; font-weight: 700; margin-bottom: 6px; letter-spacing: 0.03em; }
+.top3-enter .top3-group-label { color: var(--green); }
+.top3-exit .top3-group-label { color: var(--red); opacity: 0.7; }
+.report-top3-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.report-top3-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.report-top3-chip .chip-name { font-weight: 700; color: var(--text-primary); }
+.report-top3-chip .chip-rank { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.report-top3-chip .chip-arrow { font-family: var(--font-mono); font-size: 11px; color: var(--amber); }
+.chip-top3_new { border-left: 3px solid var(--green); }
+.chip-top3_up { border-left: 3px solid var(--accent); }
+.chip-top3_stable { border-left: 3px solid var(--text-muted); }
+.chip-top3_exit { border-left: 3px solid var(--red); opacity: 0.75; }
+
+/* Streak mini table */
+.report-streak-table-wrap { overflow-x: auto; }
+.report-streak-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.report-streak-table th { color: var(--text-muted); font-weight: 600; font-size: 11px; padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); background: var(--bg-elevated); white-space: nowrap; }
+.report-streak-table td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.report-streak-table tr:last-child td { border-bottom: none; }
+.report-streak-table tr:hover td { background: var(--bg-card-hover); }
+
+/* LHB signal cards */
+.report-lhb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.report-lhb-card { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.lhb-foreign { border-left: 3px solid #60a5fa; }
+.lhb-inst { border-left: 3px solid #fbbf24; }
+.lhb-card-header { display: flex; align-items: center; gap: 6px; }
+.lhb-card-name { font-weight: 700; font-size: 14px; color: var(--text-primary); }
+.lhb-card-net { font-family: var(--font-mono); font-weight: 800; font-size: 15px; }
+.lhb-card-tags { display: flex; flex-wrap: wrap; gap: 3px; }
+
+/* Sector heat grid */
+.report-sector-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 6px; }
+.report-sector-chip { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.report-sector-chip .sector-name { flex-shrink: 0; font-weight: 600; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sector-bar-wrap { flex: 1; height: 6px; background: var(--bg-primary); border-radius: 3px; overflow: hidden; min-width: 30px; }
+.sector-bar { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+.bar-hot { background: linear-gradient(90deg, var(--red), rgba(239,68,68,0.3)); }
+.bar-cool { background: linear-gradient(90deg, var(--green), rgba(16,185,129,0.3)); }
+.sector-diff { font-family: var(--font-mono); font-weight: 700; font-size: 12px; min-width: 28px; text-align: right; }
+.sector-counts { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.sector-hot { border-left: 2px solid var(--red); }
+.sector-cool { border-left: 2px solid var(--green); }
+.text-muted { color: var(--text-muted); }
 
 /* ===== Responsive ===== */
 @media (max-width: 900px) {
@@ -1167,4 +1218,8 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cur
 }
 @media (max-width: 600px) {
     .cards-grid { grid-template-columns: 1fr; }
+    .report-top3-row { flex-direction: column; }
+    .report-sector-grid { grid-template-columns: 1fr; }
+    .report-lhb-grid { grid-template-columns: 1fr; }
+    .report-summary-badges { display: none; }
 }

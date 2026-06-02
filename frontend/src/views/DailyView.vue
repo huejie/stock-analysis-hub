@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, inject, type Ref } from 'vue'
-import type { StockRecord, DailyStatsResponse, StreakItem, DailyReportResponse } from '../types'
+import type { StockRecord, DailyStatsResponse, StreakItem, DailyReportResponse, ReportSection, ReportItem } from '../types'
 import { useApi } from '../composables/useApi'
 import { buildChangeChartOption, buildHoldersChartOption } from '../charts/daily'
 import { CHART_COLORS, CHART_BASE } from '../charts/theme'
@@ -23,8 +23,6 @@ const toastVisible = ref(false)
 const historyMap = ref<Map<string, StockRecord[]>>(new Map())
 const selectedCode = ref<string | null>(null)
 
-const streaks = ref<StreakItem[]>([])
-const showStreaks = ref(true)
 const detailCode = ref<string | null>(null)
 const detailName = ref('')
 const report = ref<DailyReportResponse | null>(null)
@@ -147,15 +145,6 @@ function selectRow(code: string) {
   selectedCode.value = selectedCode.value === code ? null : code
 }
 
-async function loadStreaks() {
-  try {
-    const res = await api.fetchStreakStats(30, 2)
-    streaks.value = res.streaks
-  } catch {
-    streaks.value = []
-  }
-}
-
 function openStockDetail(code: string, name: string) {
   detailCode.value = code
   detailName.value = name
@@ -171,6 +160,36 @@ async function loadReport() {
   }
   reportLoading.value = false
 }
+
+// ---- 复盘面板辅助函数 ----
+function top3BadgeClass(type: string): string {
+  const map: Record<string, string> = { TOP3_NEW: 'badge-new', TOP3_UP: 'badge-up', TOP3_STABLE: 'badge-stable', TOP3_EXIT: 'badge-out' }
+  return map[type] || ''
+}
+function top3Label(type: string): string {
+  const map: Record<string, string> = { TOP3_NEW: 'NEW', TOP3_UP: 'UP', TOP3_STABLE: '=', TOP3_EXIT: 'OUT' }
+  return map[type] || type
+}
+function streakTrendIcon(trend: string): string {
+  return trend === 'rising' ? '▲' : trend === 'falling' ? '▼' : '—'
+}
+function streakTrendLabel(trend: string): string {
+  return trend === 'rising' ? '上升' : trend === 'falling' ? '下降' : '平稳'
+}
+function sectorBarWidth(diff: number): number {
+  return Math.min(100, Math.abs(diff) * 25)
+}
+function formatChange(val: number | null | undefined): string {
+  if (val == null) return '-'
+  return (val >= 0 ? '+' : '') + val.toFixed(2) + '%'
+}
+const reportSectionCount = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const s of report.value?.sections ?? []) {
+    counts[s.title] = s.items.length
+  }
+  return counts
+})
 
 import * as echarts from 'echarts'
 let trendChart: echarts.ECharts | null = null
@@ -276,7 +295,6 @@ async function init() {
     changeChartRef.value?.setOption(buildChangeChartOption(data.value.records))
     holdersChartRef.value?.setOption(buildHoldersChartOption(data.value.records))
   }
-  await loadStreaks()
   await loadReport()
 }
 
@@ -303,15 +321,131 @@ init()
       <div class="report-panel">
         <div class="report-header" @click="showReport = !showReport" style="cursor:pointer">
           <span class="section-icon">&#9670;</span> 每日复盘
-          <span class="ct-hint">{{ showReport ? '点击折叠' : '点击展开' }}</span>
+          <span class="report-summary-badges">
+            <span v-if="reportSectionCount['Top3 变动']" class="badge badge-up">{{ reportSectionCount['Top3 变动'] }} 变动</span>
+            <span v-if="reportSectionCount['连续上榜追踪']" class="badge badge-new">{{ reportSectionCount['连续上榜追踪'] }} 上榜</span>
+            <span v-if="reportSectionCount['龙虎榜信号']" class="badge badge-foreign">{{ reportSectionCount['龙虎榜信号'] }} 信号</span>
+            <span v-if="reportSectionCount['板块热度变化']" class="badge badge-sector">{{ reportSectionCount['板块热度变化'] }} 板块</span>
+          </span>
+          <span class="ct-hint">{{ showReport ? '收起' : '展开' }}</span>
         </div>
         <div v-if="showReport" class="report-body">
-          <div v-for="section in report.sections" :key="section.title" class="report-section">
-            <div class="report-section-title">{{ section.title }}</div>
-            <div v-for="item in section.items" :key="item.text" class="report-item" :class="'report-' + item.type">
-              {{ item.text }}
+          <template v-for="section in report.sections" :key="section.title">
+
+            <!-- Top3 变动: 分两组展示 -->
+            <div v-if="section.title === 'Top3 变动'" class="report-section">
+              <div class="report-section-title">Top3 变动</div>
+              <!-- 新进 -->
+              <div v-if="section.items.filter(i => i.type === 'TOP3_NEW' || i.type === 'TOP3_UP').length" class="report-top3-group top3-enter">
+                <div class="top3-group-label">&#9650; 新进/上升</div>
+                <div class="report-top3-row">
+                  <div v-for="item in section.items.filter(i => i.type === 'TOP3_NEW' || i.type === 'TOP3_UP')" :key="item.text"
+                       class="report-top3-chip" :class="'chip-' + item.type.toLowerCase()">
+                    <span class="badge" :class="top3BadgeClass(item.type)">{{ top3Label(item.type) }}</span>
+                    <span class="chip-name">{{ item.stock_name }}</span>
+                    <span class="chip-rank">#{{ item.rank }}</span>
+                    <span v-if="'prev_rank' in item && item.prev_rank" class="chip-arrow">{{ item.prev_rank }}→{{ item.rank }}</span>
+                  </div>
+                </div>
+              </div>
+              <!-- 退出/不变 -->
+              <div v-if="section.items.filter(i => i.type === 'TOP3_EXIT' || i.type === 'TOP3_STABLE').length" class="report-top3-group top3-exit">
+                <div class="top3-group-label">&#9660; 退出/保持</div>
+                <div class="report-top3-row">
+                  <div v-for="item in section.items.filter(i => i.type === 'TOP3_EXIT' || i.type === 'TOP3_STABLE')" :key="item.text"
+                       class="report-top3-chip" :class="'chip-' + item.type.toLowerCase()">
+                    <span class="badge" :class="top3BadgeClass(item.type)">{{ top3Label(item.type) }}</span>
+                    <span class="chip-name">{{ item.stock_name }}</span>
+                    <span class="chip-rank">#{{ item.rank }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+
+            <!-- 连续上榜追踪: 紧凑表格 -->
+            <div v-else-if="section.title === '连续上榜追踪'" class="report-section">
+              <div class="report-section-title">连续上榜追踪</div>
+              <div class="report-streak-table-wrap">
+                <table class="report-streak-table">
+                  <thead>
+                    <tr>
+                      <th>股票</th>
+                      <th>天数</th>
+                      <th>排名</th>
+                      <th>趋势</th>
+                      <th>涨跌</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in section.items" :key="item.text">
+                      <td>
+                        <span v-if="item.type === 'DARK_HORSE'" class="badge badge-dark-horse">黑马</span>
+                        {{ item.stock_name }}
+                        <span class="lhb-code">{{ item.stock_code }}</span>
+                      </td>
+                      <td class="streak-days">{{ item.streak_days }}天</td>
+                      <td class="streak-rank">{{ item.first_rank }}→{{ item.last_rank }}</td>
+                      <td>
+                        <span :class="item.rank_trend === 'rising' ? 'ct-up' : item.rank_trend === 'falling' ? 'ct-down' : 'text-muted'">
+                          {{ streakTrendIcon(item.rank_trend) }} {{ streakTrendLabel(item.rank_trend) }}
+                        </span>
+                      </td>
+                      <td :class="(item.latest_change ?? 0) >= 0 ? 'ct-up' : 'ct-down'">
+                        {{ formatChange(item.latest_change) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 龙虎榜信号: 卡片网格 -->
+            <div v-else-if="section.title === '龙虎榜信号'" class="report-section">
+              <div class="report-section-title">龙虎榜信号</div>
+              <div class="report-lhb-grid">
+                <div v-for="item in section.items" :key="item.text"
+                     class="report-lhb-card" :class="item.type === 'FOREIGN' ? 'lhb-foreign' : 'lhb-inst'">
+                  <div class="lhb-card-header">
+                    <span class="badge" :class="item.type === 'FOREIGN' ? 'badge-foreign' : 'badge-inst'">
+                      {{ item.type === 'FOREIGN' ? '外资' : '机构' }}
+                    </span>
+                    <span class="lhb-card-name">{{ item.stock_name }}</span>
+                  </div>
+                  <div class="lhb-card-net" :class="item.net_amt >= 0 ? 'ct-up' : 'ct-down'">
+                    净买入 {{ item.net_amt >= 0 ? '+' : '' }}{{ (item.net_amt / 10000).toFixed(1) }}亿
+                  </div>
+                  <div class="lhb-card-tags">
+                    <span v-for="tag in item.concept_tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 板块热度变化: 网格 chip + 进度条 -->
+            <div v-else-if="section.title === '板块热度变化'" class="report-section">
+              <div class="report-section-title">板块热度变化</div>
+              <div class="report-sector-grid">
+                <div v-for="item in section.items" :key="item.text"
+                     class="report-sector-chip" :class="item.diff > 0 ? 'sector-hot' : 'sector-cool'">
+                  <span class="sector-name">{{ item.sector }}</span>
+                  <div class="sector-bar-wrap">
+                    <div class="sector-bar" :class="item.diff > 0 ? 'bar-hot' : 'bar-cool'"
+                         :style="{ width: sectorBarWidth(item.diff) + '%' }"></div>
+                  </div>
+                  <span class="sector-diff" :class="item.diff > 0 ? 'ct-up' : 'ct-down'">
+                    {{ item.diff > 0 ? '+' : '' }}{{ item.diff }}
+                  </span>
+                  <span class="sector-counts">{{ item.prev_count }}→{{ item.curr_count }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 默认: 纯文本 -->
+            <div v-else class="report-section">
+              <div class="report-section-title">{{ section.title }}</div>
+              <div v-for="item in section.items" :key="item.text" class="report-item">{{ item.text }}</div>
+            </div>
+          </template>
         </div>
       </div>
     </template>
@@ -426,48 +560,6 @@ init()
         <ChartBox ref="changeChartRef" title="涨跌幅排行" />
         <ChartBox ref="holdersChartRef" title="持仓人数对比" />
       </div>
-
-      <!-- 连板追踪 -->
-      <template v-if="streaks.length > 0">
-        <div class="section-title streak-title" @click="showStreaks = !showStreaks" style="cursor:pointer">
-          <span class="section-icon">&#9670;</span> 连板追踪 ({{ streaks.length }})
-          <span class="ct-hint">{{ showStreaks ? '点击折叠' : '点击展开' }}</span>
-        </div>
-        <div v-if="showStreaks" class="compare-table-wrap">
-          <table class="compare-table">
-            <thead>
-              <tr>
-                <th class="ct-stock">股票</th>
-                <th>连板天数</th>
-                <th>排名趋势</th>
-                <th>最新涨跌</th>
-                <th>板块</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="s in streaks" :key="s.stock_code">
-                <td class="ct-stock">
-                  <span class="ct-name">{{ s.stock_name }}</span>
-                  <span class="lhb-code">{{ s.stock_code }}</span>
-                  <span v-if="s.is_dark_horse" class="badge badge-new">黑马</span>
-                </td>
-                <td class="streak-days">{{ s.streak_days }}天</td>
-                <td>
-                  <span :class="s.rank_trend === 'rising' ? 'ct-up' : s.rank_trend === 'falling' ? 'ct-down' : ''">
-                    {{ s.rank_trend === 'rising' ? '&#9650; 上升' : s.rank_trend === 'falling' ? '&#9660; 下降' : '&#9644; 稳定' }}
-                  </span>
-                </td>
-                <td :class="(s.latest_change ?? 0) >= 0 ? 'ct-up' : 'ct-down'">
-                  {{ s.latest_change != null ? (s.latest_change >= 0 ? '+' : '') + s.latest_change + '%' : '-' }}
-                </td>
-                <td>
-                  <span v-for="tag in s.sector_tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </template>
     </template>
 
     <StockDetail

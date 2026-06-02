@@ -389,5 +389,13 @@ def crawl_and_save(db: Database | None = None, target_date: date | None = None) 
     else:
         logger.warning("未获取到收益数据")
 
+    # 刷新所有股票的 sector_tags（保持板块标签最新）
+    if stock_count > 0:
+        try:
+            logger.info("开始刷新全部 sector_tags...")
+            db.refresh_sector_tags(empty_only=False)
+        except Exception as e:
+            logger.error("sector_tags 刷新失败: %s", e)
+
     logger.info("===== 爬取完成 %s =====", target_str)
     return {"date": target_str, "stock_count": stock_count, "income_count": income_count, "skipped": False}

@@ -220,29 +220,35 @@ class Database:
                 )
             """)
 
-            # 回填空 sector_tags
-            mig = conn.execute(
-                "SELECT 1 FROM _migrations WHERE name = 'backfill_sector_tags'"
-            ).fetchone()
-            if not mig:
-                empty_count = conn.execute(
-                    "SELECT COUNT(DISTINCT stock_code) FROM stock_records "
-                    "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = ''"
-                ).fetchone()[0]
-                if empty_count > 0:
-                    logger.info("开始回填 %d 只股票的 sector_tags...", empty_count)
-                    self._backfill_sector_tags(conn)
-                conn.execute(
-                    "INSERT INTO _migrations (name) VALUES ('backfill_sector_tags')"
-                )
+            # 启动时检查空 sector_tags，尝试回填
+            empty_count = conn.execute(
+                "SELECT COUNT(DISTINCT stock_code) FROM stock_records "
+                "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = '' "
+                "OR sector_tags = 'null'"
+            ).fetchone()[0]
+            if empty_count > 0:
+                logger.info("发现 %d 只股票 sector_tags 为空，尝试回填...", empty_count)
+                self.refresh_sector_tags(empty_only=True)
 
-    def _backfill_sector_tags(self, conn):
-        """从东方财富 API 回填空 sector_tags。"""
+    def refresh_sector_tags(self, empty_only: bool = False):
+        """刷新所有股票的 sector_tags（从东方财富 API 拉取最新板块标签）。
+
+        Args:
+            empty_only: True 仅刷新空 sector_tags（启动时用），
+                        False 刷新全部（每日爬虫后用，保持板块标签最新）。
+        """
         import httpx
-        rows = conn.execute(
-            "SELECT DISTINCT stock_code FROM stock_records "
-            "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = ''"
-        ).fetchall()
+        with self._get_conn() as conn:
+            if empty_only:
+                rows = conn.execute(
+                    "SELECT DISTINCT stock_code FROM stock_records "
+                    "WHERE sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = '' "
+                    "OR sector_tags = 'null'"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT stock_code FROM stock_records"
+                ).fetchall()
         updated = 0
         for (code,) in rows:
             prefix = "1" if code[0] == "6" else "0"
@@ -264,12 +270,19 @@ class Database:
                     tags.extend(c.strip() for c in data["f129"].split(",") if c.strip())
                 if tags:
                     tags_json = json.dumps(tags, ensure_ascii=False)
-                    conn.execute(
-                        "UPDATE stock_records SET sector_tags = ? WHERE stock_code = ? "
-                        "AND (sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = '')",
-                        (tags_json, code),
-                    )
-                    updated += conn.total_changes
+                    if empty_only:
+                        conn.execute(
+                            "UPDATE stock_records SET sector_tags = ? WHERE stock_code = ? "
+                            "AND (sector_tags IS NULL OR sector_tags = '[]' OR sector_tags = '' "
+                            "OR sector_tags = 'null')",
+                            (tags_json, code),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE stock_records SET sector_tags = ? WHERE stock_code = ?",
+                            (tags_json, code),
+                        )
+                    updated += 1
             except Exception as e:
                 logger.warning("sector_tags 回填失败 %s: %s", code, e)
         conn.commit()
@@ -634,7 +647,7 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    # ---- 连板统计 / 个股历史 / 回测 ----
+    # ---- 连续上榜统计 / 个股历史 / 回测 ----
 
     def query_streak_stats(self, days: int = 30, min_streak: int = 2) -> dict:
         """统计指定天数内连续上榜的股票。
