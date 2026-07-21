@@ -1,5 +1,7 @@
 import os
 import sqlite3
+from datetime import date
+from unittest.mock import patch
 import pytest
 from backend.database import Database
 
@@ -46,7 +48,7 @@ def test_insert_and_query_record(db):
         "per_capital_position": None,
         "total_fund": 1911.55,
     }
-    db.insert_record(record)
+    db.insert_records([record])
     rows = db.query_by_date("2026-04-27")
     assert len(rows) == 1
     assert rows[0]["stock_name"] == "圣阳股份"
@@ -71,14 +73,14 @@ def test_unique_constraint(db):
         "per_capital_position": None,
         "total_fund": 1911.55,
     }
-    db.insert_record(record)
+    db.insert_records([record])
     with pytest.raises(sqlite3.IntegrityError):
-        db.insert_record(record)
+        db.insert_records([record])
 
 
 def test_query_date_range(db):
     for date in ["2026-04-25", "2026-04-26", "2026-04-27"]:
-        db.insert_record({
+        db.insert_records([{
             "date": date, "rank": 1, "stock_name": "测试",
             "stock_code": "000001", "heat_value": 100.0,
             "sector_tags": '[]', "price_change_pct": 1.0,
@@ -86,14 +88,14 @@ def test_query_date_range(db):
             "holders_yesterday": 8, "price_action": "",
             "per_capital_pnl": None, "per_capital_position": None,
             "total_fund": 100.0,
-        })
+        }])
     rows = db.query_date_range("2026-04-25", "2026-04-26")
     assert len(rows) == 2
 
 
 def test_get_all_dates(db):
     for date in ["2026-04-25", "2026-04-27"]:
-        db.insert_record({
+        db.insert_records([{
             "date": date, "rank": 1, "stock_name": "测试",
             "stock_code": "000001", "heat_value": 100.0,
             "sector_tags": '[]', "price_change_pct": 1.0,
@@ -101,7 +103,7 @@ def test_get_all_dates(db):
             "holders_yesterday": 8, "price_action": "",
             "per_capital_pnl": None, "per_capital_position": None,
             "total_fund": 100.0,
-        })
+        }])
     dates = db.get_all_dates()
     assert "2026-04-25" in dates
     assert "2026-04-27" in dates
@@ -110,7 +112,7 @@ def test_get_all_dates(db):
 # ---- query_streak_stats ----
 
 def _insert_record(db, date, rank, stock_code, stock_name="测试股", sector_tags='[]'):
-    db.insert_record({
+    db.insert_records([{
         "date": date, "rank": rank, "stock_name": stock_name,
         "stock_code": stock_code, "heat_value": 100.0,
         "sector_tags": sector_tags, "price_change_pct": 1.0,
@@ -118,7 +120,7 @@ def _insert_record(db, date, rank, stock_code, stock_name="测试股", sector_ta
         "holders_yesterday": 8, "price_action": "",
         "per_capital_pnl": None, "per_capital_position": None,
         "total_fund": 100.0,
-    })
+    }])
 
 
 def test_streak_stats_empty(db):
@@ -132,12 +134,16 @@ def test_streak_stats_empty(db):
 def test_streak_stats_with_data(db):
     """000001 连续 3 天 (rank 5,3,1) -> is_dark_horse=True。
     000002 只有 1 天 -> 不满足 min_streak=2 被过滤。"""
-    _insert_record(db, "2026-05-19", 5, "000001", "测试A")
-    _insert_record(db, "2026-05-20", 3, "000001", "测试A")
-    _insert_record(db, "2026-05-21", 1, "000001", "测试A")
-    _insert_record(db, "2026-05-21", 2, "000002", "测试B")
+    # 测试数据是 2026-05，避免与当前真实日期耦合导致窗口不覆盖
+    with patch("backend.database.date") as mock_date:
+        mock_date.today.return_value = date(2026, 5, 22)
+        mock_date.side_effect = lambda *a, **k: date(*a, **k)
+        _insert_record(db, "2026-05-19", 5, "000001", "测试A")
+        _insert_record(db, "2026-05-20", 3, "000001", "测试A")
+        _insert_record(db, "2026-05-21", 1, "000001", "测试A")
+        _insert_record(db, "2026-05-21", 2, "000002", "测试B")
 
-    result = db.query_streak_stats(days=30, min_streak=2)
+        result = db.query_streak_stats(days=30, min_streak=2)
     streaks = result["streaks"]
     assert len(streaks) == 1
     s = streaks[0]
@@ -152,11 +158,14 @@ def test_streak_stats_with_data(db):
 
 def test_streak_stats_min_streak_filter(db):
     """000001 连续 2 天, 000002 只有 1 天。min_streak=2 只返回 000001。"""
-    _insert_record(db, "2026-05-20", 3, "000001", "测试A")
-    _insert_record(db, "2026-05-21", 1, "000001", "测试A")
-    _insert_record(db, "2026-05-21", 2, "000002", "测试B")
+    with patch("backend.database.date") as mock_date:
+        mock_date.today.return_value = date(2026, 5, 22)
+        mock_date.side_effect = lambda *a, **k: date(*a, **k)
+        _insert_record(db, "2026-05-20", 3, "000001", "测试A")
+        _insert_record(db, "2026-05-21", 1, "000001", "测试A")
+        _insert_record(db, "2026-05-21", 2, "000002", "测试B")
 
-    result = db.query_streak_stats(days=30, min_streak=2)
+        result = db.query_streak_stats(days=30, min_streak=2)
     streaks = result["streaks"]
     assert len(streaks) == 1
     assert streaks[0]["stock_code"] == "000001"
