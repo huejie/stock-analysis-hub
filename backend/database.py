@@ -23,6 +23,10 @@ class Database:
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # 启用 WAL/外键/busy_timeout,与 trading 模块一致(文档 10.1)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_db(self):
