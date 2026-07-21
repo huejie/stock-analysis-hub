@@ -607,3 +607,84 @@ async def daily_report(date_str: str = ""):
 async def get_backtest(signal_type: str = "", months: int = 3, group_by: str = "month"):
     """龙虎榜回测统计。"""
     return db.query_backtest(signal_type, months, group_by)
+
+
+# ---- AI 分析 ----
+# 数据导出由 export_ai_data.py 完成，分析由 Hermes 手动执行，结果通过 import 端点保存。
+
+@app.get("/api/ai/daily-review")
+async def get_daily_review(date: str = ""):
+    """获取 AI 每日复盘报告（从数据库读取）。"""
+    target_date = date or date.today().isoformat()
+    row = db.query_ai_analysis("daily_review", target_date)
+    if row:
+        return {
+            "date": target_date,
+            "content": row.get("response", ""),
+            "generated_at": row.get("created_at", ""),
+            "model": row.get("model_name", "Hermes"),
+        }
+    return {"date": target_date, "content": None, "message": "暂无分析，请导出数据后让 Hermes 分析并导入"}
+
+
+@app.post("/api/ai/import")
+async def import_ai_analysis(data: dict):
+    """导入 Hermes 生成的分析结果。
+
+    请求体: {"analysis_type": "daily_review", "date": "2026-06-05", "content": "分析内容...", "model": "Hermes"}
+    """
+    analysis_type = data.get("analysis_type", "")
+    date_str = data.get("date", "")
+    content = data.get("content", "")
+
+    if not analysis_type or not date_str or not content:
+        raise HTTPException(400, "analysis_type, date, content 均必填")
+
+    valid_types = {"daily_review", "stock_pick", "signal_diagnosis"}
+    if analysis_type not in valid_types:
+        raise HTTPException(400, f"analysis_type 必须是: {', '.join(valid_types)}")
+
+    db.save_ai_analysis(
+        analysis_type=analysis_type,
+        date_str=date_str,
+        input_summary="Hermes manual import",
+        response=content,
+        model_name=data.get("model", "Hermes"),
+    )
+    return {"status": "ok", "message": f"已导入 {analysis_type} ({date_str})"}
+
+
+@app.get("/api/ai/history")
+async def get_ai_history(analysis_type: str = "", days: int = 30):
+    """查询 AI 分析历史记录。"""
+    return {"records": db.query_ai_history(analysis_type, days)}
+
+
+@app.get("/api/ai/stock-pick")
+async def get_stock_pick(date: str = ""):
+    """获取智能选股结果（从数据库读取）。"""
+    target_date = date or date.today().isoformat()
+    row = db.query_ai_analysis("stock_pick", target_date)
+    if row:
+        return {
+            "date": target_date,
+            "content": row.get("response", ""),
+            "generated_at": row.get("created_at", ""),
+            "model": row.get("model_name", "Hermes"),
+        }
+    return {"date": target_date, "content": None, "message": "暂无选股结果，请导出数据后让 Hermes 分析并导入"}
+
+
+@app.get("/api/ai/signal-diagnosis")
+async def get_signal_diagnosis(period: int = 30):
+    """获取信号有效性诊断（从数据库读取）。"""
+    today_str = date.today().isoformat()
+    row = db.query_ai_analysis("signal_diagnosis", today_str)
+    if row:
+        return {
+            "date": today_str,
+            "content": row.get("response", ""),
+            "generated_at": row.get("created_at", ""),
+            "model": row.get("model_name", "Hermes"),
+        }
+    return {"date": today_str, "content": None, "message": "暂无诊断结果，请导出数据后让 Hermes 分析并导入"}

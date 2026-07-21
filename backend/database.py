@@ -220,6 +220,24 @@ class Database:
                 )
             """)
 
+            # AI 分析日志（缓存 + 历史记录）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_analysis (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    analysis_type TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    input_summary TEXT,
+                    prompt_hash TEXT,
+                    response TEXT NOT NULL,
+                    parsed_result TEXT,
+                    model_name TEXT,
+                    tokens_used INTEGER,
+                    duration_ms INTEGER,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    UNIQUE(analysis_type, date, prompt_hash)
+                )
+            """)
+
             # 启动时检查空 sector_tags，尝试回填
             empty_count = conn.execute(
                 "SELECT COUNT(DISTINCT stock_code) FROM stock_records "
@@ -971,3 +989,68 @@ class Database:
             "horizon_stats": horizon_stats,
             "sector_stats": sector_stats,
         }
+
+    # ---- AI 分析 ----
+
+    def save_ai_analysis(self, analysis_type: str, date_str: str,
+                         input_summary: str, response: str,
+                         parsed_result: str | None = None,
+                         model_name: str = "", tokens_used: int = 0,
+                         duration_ms: int = 0) -> None:
+        """保存 AI 分析结果（缓存 + 历史）。"""
+        import hashlib
+        prompt_hash = hashlib.md5(input_summary.encode()).hexdigest()[:12]
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO ai_analysis
+                    (analysis_type, date, input_summary, prompt_hash,
+                     response, parsed_result, model_name, tokens_used, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analysis_type, date, prompt_hash) DO UPDATE SET
+                    response = excluded.response,
+                    parsed_result = COALESCE(excluded.parsed_result, ai_analysis.parsed_result),
+                    model_name = excluded.model_name,
+                    tokens_used = excluded.tokens_used,
+                    duration_ms = excluded.duration_ms
+            """, (analysis_type, date_str, input_summary, prompt_hash,
+                  response, parsed_result, model_name, tokens_used, duration_ms))
+
+    def query_ai_analysis(self, analysis_type: str, date_str: str) -> dict | None:
+        """查询指定类型和日期的 AI 分析结果（读缓存）。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_analysis WHERE analysis_type = ? AND date = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (analysis_type, date_str),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def query_ai_history(self, analysis_type: str = "", days: int = 30) -> list[dict]:
+        """查询 AI 分析历史记录。"""
+        with self._get_conn() as conn:
+            if analysis_type:
+                rows = conn.execute(
+                    "SELECT id, analysis_type, date, model_name, tokens_used, "
+                    "duration_ms, created_at FROM ai_analysis "
+                    "WHERE analysis_type = ? AND date >= date('now', ?) "
+                    "ORDER BY date DESC",
+                    (analysis_type, f"-{days} days"),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, analysis_type, date, model_name, tokens_used, "
+                    "duration_ms, created_at FROM ai_analysis "
+                    "WHERE date >= date('now', ?) "
+                    "ORDER BY date DESC",
+                    (f"-{days} days",),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def query_prev_trade_date(self, date_str: str) -> str:
+        """查询指定日期的前一个交易日（基于 stock_records 中有数据的日期）。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(date) AS d FROM stock_records WHERE date < ?",
+                (date_str,),
+            ).fetchone()
+            return row["d"] if row and row["d"] else ""

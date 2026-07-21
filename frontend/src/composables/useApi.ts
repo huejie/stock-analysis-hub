@@ -113,5 +113,18 @@ export function useApi() {
       const s = qs.toString()
       return request<BacktestResponse>(`/api/lhb/backtest${s ? '?' + s : ''}`)
     },
+
+    // ---- AI 分析 ----
+
+    importAIAnalysis: (data: { analysis_type: string; date: string; content: string; model?: string }) =>
+      request<{ status: string; message: string }>({ url: '/api/ai/import', method: 'POST', body: JSON.stringify(data) }),
+
+    fetchAIHistory: (analysisType?: string, days?: number) => {
+      const qs = new URLSearchParams()
+      if (analysisType) qs.set('analysis_type', analysisType)
+      if (days) qs.set('days', String(days))
+      const s = qs.toString()
+      return request<{ records: Array<{ id: number; analysis_type: string; date: string; model_name: string; created_at: string }> }>(`/api/ai/history${s ? '?' + s : ''}`)
+    },
   }
 }

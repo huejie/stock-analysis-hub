@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import httpx
 
 from backend.database import Database
+from backend import akshare_fallback
 
 logger = logging.getLogger("lhb_crawler")
 
@@ -58,15 +59,18 @@ def fetch_lhb_data(date_str: str) -> list[dict]:
         body = resp.json()
     except Exception as e:
         logger.error("龙虎榜数据请求失败 %s: %s", date_str, e)
-        return []
+        logger.info("尝试 AKShare 兜底获取龙虎榜汇总...")
+        return akshare_fallback.fetch_lhb_summary_fallback(date_str)
 
     if not body.get("success"):
         logger.warning("龙虎榜数据返回异常 %s: %s", date_str, body.get("message"))
-        return []
+        logger.info("尝试 AKShare 兜底获取龙虎榜汇总...")
+        return akshare_fallback.fetch_lhb_summary_fallback(date_str)
 
     rows = (body.get("result") or {}).get("data", [])
     if not rows:
-        return []
+        logger.info("东方财富无龙虎榜数据 %s，尝试 AKShare 兜底...", date_str)
+        return akshare_fallback.fetch_lhb_summary_fallback(date_str)
 
     records = []
     for item in rows:
@@ -100,6 +104,7 @@ def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) 
     这里做去重处理，并给同名席位（如多个"机构专用"）分配 seat_index 以便区分。
     """
     records = []
+    failed_sides = []
     for side, report_name in [("buy", "RPT_BILLBOARD_DAILYDETAILSBUY"), ("sell", "RPT_BILLBOARD_DAILYDETAILSSELL")]:
         try:
             resp = httpx.get(
@@ -122,6 +127,7 @@ def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) 
             body = resp.json()
         except Exception as e:
             logger.warning("营业部明细请求失败 %s %s %s: %s", date_str, stock_code, side, e)
+            failed_sides.append(side)
             continue
 
         result = body.get("result") or {}
@@ -157,7 +163,48 @@ def fetch_trading_desk_details(date_str: str, stock_code: str, stock_name: str) 
                 "net_amt": item.get("NET"),
             })
 
+    # 如果买卖双方都失败，尝试 AKShare 兜底
+    if failed_sides and len(failed_sides) == 2 and not records:
+        logger.info("营业部明细全部失败，尝试 AKShare 兜底 %s %s...", date_str, stock_code)
+        fallback_records = akshare_fallback.fetch_trading_desk_fallback(date_str, stock_code, stock_name)
+        if fallback_records:
+            return fallback_records
+
     return records
+
+
+def _get_cached_tags(stock_code: str) -> list[str]:
+    """从数据库中获取该股票的历史概念板块标签作为兜底。
+
+    依次从 stock_records 和 lhb_signals 两个表查找。
+    """
+    import sqlite3
+    import json as _json
+    try:
+        conn = sqlite3.connect("data/stock.db")
+        # 先查 stock_records
+        row = conn.execute(
+            "SELECT sector_tags FROM stock_records WHERE stock_code = ? "
+            "AND sector_tags IS NOT NULL AND sector_tags != '[]' AND sector_tags != '' "
+            "LIMIT 1",
+            (stock_code,),
+        ).fetchone()
+        if row and row[0]:
+            conn.close()
+            return _json.loads(row[0])
+        # 再查 lhb_signals
+        row = conn.execute(
+            "SELECT concept_tags FROM lhb_signals WHERE stock_code = ? "
+            "AND concept_tags IS NOT NULL AND concept_tags != '[]' AND concept_tags != '' "
+            "LIMIT 1",
+            (stock_code,),
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            return _json.loads(row[0])
+    except Exception:
+        pass
+    return []
 
 
 def fetch_concept_tags(stock_code: str) -> list[str]:
@@ -186,6 +233,11 @@ def fetch_concept_tags(stock_code: str) -> list[str]:
         return tags
     except Exception as e:
         logger.warning("概念板块获取失败 %s: %s", stock_code, e)
+        # AKShare 没有直接的反查概念接口，尝试从数据库历史记录取缓存
+        cached = _get_cached_tags(stock_code)
+        if cached:
+            logger.info("使用数据库缓存的概念板块 %s: %d 个标签", stock_code, len(cached))
+            return cached
         return []
 
 

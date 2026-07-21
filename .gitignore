@@ -12,11 +12,18 @@ data/backup/
 data/ocr_debug.txt
 data/ocr_debug_latest.txt
 data/crawler.log
+data/ai_export_*.md
 
 # Uploads
 uploads/*.png
 uploads/*.jpg
 uploads/*.jpeg
+
+# 调试截图 / 快照（开发期临时产物，不入库）
+/*.png
+/*.jpeg
+/*.jpg
+/daily-snapshot.txt
 
 # Frontend
 frontend/node_modules/

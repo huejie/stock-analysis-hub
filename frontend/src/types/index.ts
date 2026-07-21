@@ -35,7 +35,7 @@ export interface SaveResponse {
   count: number
 }
 
-export type ViewTab = 'daily' | 'pnl' | 'range' | 'lhb'
+export type ViewTab = 'daily' | 'pnl' | 'range' | 'lhb' | 'ai'
 export type PresetDays = 7 | 30 | 60 | 90 | 0 | 'custom'
 
 export interface LhbSignal {
@@ -233,4 +233,46 @@ export interface BacktestResponse {
   period_stats: BacktestPeriodStat[]
   horizon_stats: BacktestHorizonStat[]
   sector_stats: BacktestSectorStat[]
+}
+
+// ---- AI 分析 ----
+
+export interface AIAnalysisResult {
+  date: string
+  generated_at: string
+  model: string
+  tokens_used?: number
+  duration_ms?: number
+  content: string | null
+  message?: string
+  error?: string
+}
+
+export interface AIStockPickRequest {
+  strategy: 'aggressive' | 'balanced' | 'conservative'
+  custom_prompt?: string
+  sector_filter?: string[]
+  max_results?: number
+}
+
+export interface AISignalDiagnosis extends AIAnalysisResult {
+  period_days?: number
+  start_date?: string
+  end_date?: string
+  backtest_summary?: {
+    overall_win_rate: number | null
+    total_signals: number
+    foreign_win_rate: number | null
+    inst_win_rate: number | null
+  }
+}
+
+export interface AIHistoryRecord {
+  id: number
+  analysis_type: string
+  date: string
+  model_name: string
+  tokens_used: number
+  duration_ms: number
+  created_at: string
 }
