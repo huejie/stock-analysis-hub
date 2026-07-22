@@ -108,7 +108,13 @@ pytest -v  # 详细输出
   - `providers/` — 行情适配层：`base.py`(Protocol)、`eastmoney.py`(主源,K线走腾讯公开接口)、`akshare_provider.py`(备用,延迟加载)、`composite.py`(主备切换/重试/熔断)。
   - `services/` — 业务服务：`pool_service.py`(股票池导入/版本化)、`market_data_service.py`(行情更新+数据质量门禁)。
 - **`trade_*` 表** — 股池版本/明细、日线行情、数据问题、任务/锁，与现有表物理隔离。WAL + foreign_keys + busy_timeout 已全局启用。
-- **Phase 1 范围**：模块骨架 + Provider 适配 + 股票池导入 + 数据健康门禁 + 5 个 API + 前端 `📊 交易决策` Tab。账户/持仓/策略/计划生成/回测在 Phase 2-5。
+- **Phase 1 范围**：模块骨架 + Provider 适配 + 股票池导入 + 数据健康门禁 + 5 个 API + 前端 `📊 交易决策` Tab。
+- **Phase 2 范围（已交付）**：账户/持仓/成交 CRUD + T+1 可卖数量 + 净值快照（peak/drawdown）+ 仓位计算纯函数 + 账户级风险限制。
+  - `position_sizing.py` — 仓位计算纯函数（`compute_stop_price`/`compute_buy_quantity`/`effective_risk_per_trade`），A 股 100 股整手，Phase 3 注入市场状态参数。
+  - `services/account_service.py` — 账户 CRUD + 唯一 active 约束（单主账户）+ 审计日志。
+  - `services/execution_service.py` — 成交录入 + 原子更新（现金/持仓/审计）+ T+1（买入当日 available=0，`roll_t1_available` 懒滚动）+ `client_execution_id` 幂等。
+  - `services/portfolio_service.py` — 净值快照（cash/market_value/total_equity/exposure/peak_equity/drawdown）+ 行业暴露聚合 + `check_risk_limits`（总仓位/单股/行业/数量/回撤 5 类限制）。
+- 策略/计划生成/回测/前端账户面板在 Phase 3-5。
 
 ## 龙虎榜股池追踪
 
@@ -190,7 +196,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
 
-### 交易决策 API（Phase 1）
+### 交易决策 API（Phase 1 + Phase 2）
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -202,3 +208,19 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/trading/data-jobs/{job_id}` | 查询数据任务状态（404 if 不存在） |
 
 > 数据质量门禁判定：基准指数缺失 → BLOCKING；股票池缺失比例 > 5% → BLOCKING，== 5% → WARNING(PARTIAL)；全部就绪 → OK。Phase 1 无 scheduler，data-jobs 创建后停留在 QUEUED。
+
+**Phase 2（账户/持仓/成交/净值）：**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/trading/accounts` | 创建账户（含风险配置，默认值 spec §8.2） |
+| GET | `/api/trading/accounts?active_only=` | 账户列表 |
+| GET | `/api/trading/accounts/{id}` | 账户详情（404 if 不存在） |
+| PUT | `/api/trading/accounts/{id}` | 更新风险配置（`initial_equity` 不可改 → 400） |
+| GET | `/api/trading/positions?account_id=` | 持仓列表 |
+| PUT | `/api/trading/positions/{stock_code}` | 人工校正持仓（spec §12.5，写审计） |
+| POST | `/api/trading/executions` | 录入成交（原子更新现金/持仓/审计；`client_execution_id` 幂等） |
+| GET | `/api/trading/executions?account_id=&start=&end=` | 成交记录 |
+| GET | `/api/trading/equity-snapshots/{account_id}?trade_date=` | 净值快照（含 peak/drawdown，持仓缺行情 → 400） |
+
+> T+1：买入当日 `available_quantity=0`，`roll_t1_available` 在新交易日首次访问时懒滚动。成交幂等靠 `client_execution_id` UNIQUE。仓位计算（`position_sizing.py`）为纯函数，Phase 3 注入市场状态/regime 参数。

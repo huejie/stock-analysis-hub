@@ -783,3 +783,36 @@ if records:
 
 ### Phase 2 起点
 账户、持仓、成交 CRUD + 净值计算。参考设计文档第 17 章 Phase 2 与计划文件 `docs/superpowers/plans/2026-07-21-trading-phase1.md`。
+
+---
+
+## Trading Decision System Phase 2 完成（2026-07-22）
+
+基于 `docs/specs/2026-07-21-trading-decision-system-design.md` 第 17 章 Phase 2（账户、持仓和风险引擎）已实现。
+
+### 已交付
+- **Migration v2**：新增 4 张 Phase 2 表（accounts/positions/executions/equity_snapshots）+ Phase 3 预建空表（strategy_versions/plan_runs/plan_items/audit_logs）保证 FK 完整性。`trade_executions` 加 `client_execution_id UNIQUE` 列实现幂等。
+- **仓位计算纯函数**（`position_sizing.py`）：`compute_stop_price`（3%-10% 距离边界）、`compute_buy_quantity`（A 股 100 股整手，risk/cap/cash 三重限制）、`effective_risk_per_trade`（连续亏损/中性/降级乘法缩减 + 0.1% floor）。
+- **AccountService**：账户 CRUD + 唯一 active 约束（单主账户）+ 审计日志。`initial_equity` 创建后不可改。
+- **ExecutionService**：成交录入原子更新（现金/持仓/审计）+ T+1（买入当日 `available_quantity=0`，`roll_t1_available` 懒滚动）+ `client_execution_id` 幂等 + 现金/可卖数量校验。
+- **PortfolioService**：净值快照（cash/market_value/total_equity/exposure/peak_equity 单调非递减/drawdown）+ 行业暴露聚合 + `check_risk_limits`（总仓位/单股/行业/数量/回撤 5 类）。
+- **9 个新 API 端点**：accounts CRUD、positions 查询/校正、executions 录入/查询、equity-snapshots。
+
+### 测试基线
+- 后端：`139 → 190 passed`（+51 个 Phase 2 测试，零回归）
+- 前端：`npm run build` 通过（Phase 2 无前端改动）
+
+### 完成标准达成（spec §17 Phase 2）
+> "给定账户和持仓，可稳定计算可用风险预算与最大可买数量。"
+
+✅ `compute_buy_quantity(total_equity, cash, entry_price, stop_price, effective_risk_per_trade, max_single_position)` 纯函数，14 个边界值单测覆盖。✅ T+1 可卖数量语义。✅ 净值/暴露/peak/drawdown 计算。✅ 5 类风险限制检查。
+
+### 关键设计决策（spec gap 填补）
+- 净值公式采用标准定义（spec 未明确）：`total_equity = cash + market_value`，`peak_equity = MAX(prior, current)` 单调。
+- T+1 用 lazy compute（首次读新交易日滚动），不依赖 scheduler。
+- 成交幂等用 `client_execution_id`（spec 未规定，用户确认）。
+- 行业暴露 Phase 2 按"未知"聚合（sector 标签来自 pool_items，Phase 1 未强制填充）。
+- Phase 3 预建空表保证 `trade_executions.plan_item_id` FK 在 `PRAGMA foreign_keys=ON` 下有效。
+
+### Phase 3 起点
+市场状态分类、股票评分、入场/退出规则、ATR/MA 指标、计划生成状态机、幂等键。Phase 2 的 `position_sizing.py` 纯函数已为 Phase 3 注入市场状态参数做好准备。

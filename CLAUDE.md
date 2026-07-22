@@ -106,7 +106,9 @@ pytest -v  # 详细输出
   - `providers/` — 行情适配：`eastmoney`(主源)、`akshare_provider`(备用,延迟加载)、`composite`(主备切换/重试/熔断)。
   - `services/` — `pool_service`(股票池)、`market_data_service`(行情+数据质量门禁)。
 - **`trade_*` 表** — 股池版本/明细、日线行情、数据问题、任务，与现有表物理隔离。
-- **Phase 1 范围**：骨架 + Provider + 股票池 + 数据健康 + 前端 Tab。账户/持仓/策略/计划生成/回测在 Phase 2-5。
+- **Phase 1 范围**：骨架 + Provider + 股票池 + 数据健康 + 前端 Tab。
+- **Phase 2 范围（已交付）**：账户/持仓/成交 CRUD + T+1 + 净值快照（peak/drawdown）+ 仓位计算纯函数 + 账户级风险限制。`position_sizing.py`/`account_service.py`/`execution_service.py`/`portfolio_service.py`。
+- 策略/计划生成/回测/前端账户面板在 Phase 3-5。
 
 ## 龙虎榜股池追踪
 
@@ -188,7 +190,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
 
-### 交易决策 API（Phase 1）
+### 交易决策 API（Phase 1 + Phase 2）
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -198,3 +200,17 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/trading/data-health?trade_date=` | 数据质量门禁报告（OK/PARTIAL/BLOCKED） |
 | POST | `/api/trading/data-jobs` | 创建数据任务（202，Phase 1 仅记录） |
 | GET | `/api/trading/data-jobs/{job_id}` | 查询数据任务状态 |
+
+**Phase 2（账户/持仓/成交/净值）：**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/trading/accounts` | 创建账户（含风险配置） |
+| GET | `/api/trading/accounts?active_only=` | 账户列表 |
+| GET | `/api/trading/accounts/{id}` | 账户详情 |
+| PUT | `/api/trading/accounts/{id}` | 更新风险配置（initial_equity 不可改） |
+| GET | `/api/trading/positions?account_id=` | 持仓列表 |
+| PUT | `/api/trading/positions/{stock_code}` | 人工校正持仓 |
+| POST | `/api/trading/executions` | 录入成交（原子更新 + client_execution_id 幂等） |
+| GET | `/api/trading/executions?account_id=&start=&end=` | 成交记录 |
+| GET | `/api/trading/equity-snapshots/{account_id}?trade_date=` | 净值快照（peak/drawdown） |
