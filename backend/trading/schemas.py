@@ -175,6 +175,7 @@ class AccountUpdateRequest(BaseModel):
     max_positions: int | None = Field(default=None, ge=1, le=20)
     max_drawdown_limit: float | None = Field(default=None, gt=0, le=0.5)
     is_active: bool | None = None
+    initial_equity: float | None = Field(default=None, gt=0)
 
 
 class AccountResponse(BaseModel):
