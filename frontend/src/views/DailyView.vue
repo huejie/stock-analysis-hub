@@ -387,7 +387,7 @@ init()
                       <td class="streak-rank">{{ item.first_rank }}→{{ item.last_rank }}</td>
                       <td>
                         <span :class="item.rank_trend === 'rising' ? 'ct-up' : item.rank_trend === 'falling' ? 'ct-down' : 'text-muted'">
-                          {{ streakTrendIcon(item.rank_trend) }} {{ streakTrendLabel(item.rank_trend) }}
+                          {{ streakTrendIcon(item.rank_trend ?? '') }} {{ streakTrendLabel(item.rank_trend ?? '') }}
                         </span>
                       </td>
                       <td :class="(item.latest_change ?? 0) >= 0 ? 'ct-up' : 'ct-down'">
@@ -411,11 +411,11 @@ init()
                     </span>
                     <span class="lhb-card-name">{{ item.stock_name }}</span>
                   </div>
-                  <div class="lhb-card-net" :class="item.net_amt >= 0 ? 'ct-up' : 'ct-down'">
-                    净买入 {{ item.net_amt >= 0 ? '+' : '' }}{{ (item.net_amt / 10000).toFixed(1) }}亿
+                  <div class="lhb-card-net" :class="(item.net_amt ?? 0) >= 0 ? 'ct-up' : 'ct-down'">
+                    净买入 {{ (item.net_amt ?? 0) >= 0 ? '+' : '' }}{{ ((item.net_amt ?? 0) / 10000).toFixed(1) }}亿
                   </div>
                   <div class="lhb-card-tags">
-                    <span v-for="tag in item.concept_tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                    <span v-for="tag in (item.concept_tags ?? []).slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
                   </div>
                 </div>
               </div>
@@ -426,14 +426,14 @@ init()
               <div class="report-section-title">板块热度变化</div>
               <div class="report-sector-grid">
                 <div v-for="item in section.items" :key="item.text"
-                     class="report-sector-chip" :class="item.diff > 0 ? 'sector-hot' : 'sector-cool'">
+                     class="report-sector-chip" :class="(item.diff ?? 0) > 0 ? 'sector-hot' : 'sector-cool'">
                   <span class="sector-name">{{ item.sector }}</span>
                   <div class="sector-bar-wrap">
-                    <div class="sector-bar" :class="item.diff > 0 ? 'bar-hot' : 'bar-cool'"
-                         :style="{ width: sectorBarWidth(item.diff) + '%' }"></div>
+                    <div class="sector-bar" :class="(item.diff ?? 0) > 0 ? 'bar-hot' : 'bar-cool'"
+                         :style="{ width: sectorBarWidth(item.diff ?? 0) + '%' }"></div>
                   </div>
-                  <span class="sector-diff" :class="item.diff > 0 ? 'ct-up' : 'ct-down'">
-                    {{ item.diff > 0 ? '+' : '' }}{{ item.diff }}
+                  <span class="sector-diff" :class="(item.diff ?? 0) > 0 ? 'ct-up' : 'ct-down'">
+                    {{ (item.diff ?? 0) > 0 ? '+' : '' }}{{ item.diff ?? 0 }}
                   </span>
                   <span class="sector-counts">{{ item.prev_count }}→{{ item.curr_count }}</span>
                 </div>

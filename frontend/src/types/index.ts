@@ -149,6 +149,9 @@ export interface StockDetailResponse {
 }
 
 // 每日复盘报告
+// 注:ReportItem 用单一 interface(全部可选)而非 discriminated union,
+// 因为 Vue 模板的 v-if 字符串分支无法做 TS narrowing。后端按 type 返回
+// 对应字段子集,前端按 section.title 选择渲染分支。
 export interface Top3ReportItem {
   type: 'TOP3_NEW' | 'TOP3_UP' | 'TOP3_STABLE' | 'TOP3_EXIT'
   text: string
@@ -189,7 +192,30 @@ export interface SectorReportItem {
   diff: number
 }
 
-export type ReportItem = Top3ReportItem | StreakReportItem | LhbReportItem | SectorReportItem
+// 统一宽松类型:模板可安全访问任何属性(undefined-safe),按 type 判别后使用。
+// 保留上面具体 interface 供代码路径明确时强类型使用。
+export interface ReportItem {
+  type: Top3ReportItem['type'] | StreakReportItem['type'] | LhbReportItem['type'] | SectorReportItem['type']
+  text: string
+  // 以下字段按 type 不同而存在,全部声明为可选
+  stock_name?: string
+  stock_code?: string
+  rank?: number
+  prev_rank?: number
+  streak_days?: number
+  rank_trend?: string
+  first_rank?: number
+  last_rank?: number
+  latest_change?: number | null
+  net_amt?: number
+  change_rate?: number | null
+  concept_tags?: string[]
+  sector?: string
+  prev_count?: number
+  curr_count?: number
+  diff?: number
+  [key: string]: unknown  // 允许后端返回额外字段
+}
 
 export interface ReportSection {
   title: string
