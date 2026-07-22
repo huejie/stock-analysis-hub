@@ -35,7 +35,7 @@ export interface SaveResponse {
   count: number
 }
 
-export type ViewTab = 'daily' | 'pnl' | 'range' | 'lhb' | 'ai'
+export type ViewTab = 'daily' | 'pnl' | 'range' | 'lhb' | 'ai' | 'trading'
 export type PresetDays = 7 | 30 | 60 | 90 | 0 | 'custom'
 
 export interface LhbSignal {
