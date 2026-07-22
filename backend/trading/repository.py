@@ -360,3 +360,287 @@ class TradingRepository:
             return d
         finally:
             conn.close()
+
+    # ---- Phase 2: Account ----
+
+    def create_account(self, *, name: str, initial_equity: float, cash_balance: float,
+                       risk_per_trade: float = 0.005, max_single_position: float = 0.15,
+                       max_total_exposure: float = 0.60, max_sector_exposure: float = 0.30,
+                       max_positions: int = 5, max_drawdown_limit: float = 0.08,
+                       is_active: bool = True) -> dict:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO trade_accounts "
+                "(name, initial_equity, cash_balance, risk_per_trade, max_single_position, "
+                " max_total_exposure, max_sector_exposure, max_positions, max_drawdown_limit, is_active) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, initial_equity, cash_balance, risk_per_trade, max_single_position,
+                 max_total_exposure, max_sector_exposure, max_positions, max_drawdown_limit,
+                 1 if is_active else 0),
+            )
+            conn.commit()
+            return self._row_to_account(
+                conn.execute("SELECT * FROM trade_accounts WHERE id = ?", (cur.lastrowid,)).fetchone()
+            )
+        finally:
+            conn.close()
+
+    def get_account(self, account_id: int) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute("SELECT * FROM trade_accounts WHERE id = ?", (account_id,)).fetchone()
+            return self._row_to_account(row) if row else None
+        finally:
+            conn.close()
+
+    def list_accounts(self, active_only: bool = False) -> list[dict]:
+        conn = self._conn()
+        try:
+            if active_only:
+                rows = conn.execute("SELECT * FROM trade_accounts WHERE is_active = 1 ORDER BY id").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM trade_accounts ORDER BY id").fetchall()
+            return [self._row_to_account(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_account(self, account_id: int, fields: dict) -> None:
+        """更新账户。initial_equity 不在允许字段内(语义不可改)。"""
+        allowed = {"cash_balance", "risk_per_trade", "max_single_position",
+                   "max_total_exposure", "max_sector_exposure", "max_positions",
+                   "max_drawdown_limit", "is_active"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return
+        # is_active bool -> int
+        if "is_active" in updates:
+            updates["is_active"] = 1 if updates["is_active"] else 0
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        params = list(updates.values()) + [account_id]
+        conn = self._conn()
+        try:
+            conn.execute(
+                f"UPDATE trade_accounts SET {sets}, updated_at = datetime('now','localtime') "
+                f"WHERE id = ?",
+                params,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_account(row) -> dict:
+        return {
+            "id": row["id"], "name": row["name"], "initial_equity": row["initial_equity"],
+            "cash_balance": row["cash_balance"], "risk_per_trade": row["risk_per_trade"],
+            "max_single_position": row["max_single_position"],
+            "max_total_exposure": row["max_total_exposure"],
+            "max_sector_exposure": row["max_sector_exposure"],
+            "max_positions": row["max_positions"],
+            "max_drawdown_limit": row["max_drawdown_limit"],
+            "is_active": bool(row["is_active"]),
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+
+    # ---- Phase 2: Position ----
+
+    def upsert_position(self, *, account_id: int, stock_code: str,
+                        quantity: int, available_quantity: int, average_cost: float,
+                        stock_name: str | None = None,
+                        initial_stop: float | None = None,
+                        trailing_stop: float | None = None,
+                        opened_at: str | None = None) -> dict:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO trade_positions "
+                "(account_id, stock_code, stock_name, quantity, available_quantity, "
+                " average_cost, initial_stop, trailing_stop, opened_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(account_id, stock_code) DO UPDATE SET "
+                "  quantity = excluded.quantity, "
+                "  available_quantity = excluded.available_quantity, "
+                "  average_cost = excluded.average_cost, "
+                "  stock_name = COALESCE(excluded.stock_name, trade_positions.stock_name), "
+                "  initial_stop = COALESCE(excluded.initial_stop, trade_positions.initial_stop), "
+                "  trailing_stop = COALESCE(excluded.trailing_stop, trade_positions.trailing_stop), "
+                "  updated_at = datetime('now','localtime')",
+                (account_id, stock_code, stock_name, quantity, available_quantity,
+                 average_cost, initial_stop, trailing_stop, opened_at),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM trade_positions WHERE account_id = ? AND stock_code = ?",
+                               (account_id, stock_code)).fetchone()
+            return dict(row)
+        finally:
+            conn.close()
+
+    def get_positions(self, account_id: int) -> list[dict]:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trade_positions WHERE account_id = ? ORDER BY stock_code",
+                (account_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_position(self, account_id: int, stock_code: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_position(self, account_id: int, stock_code: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM trade_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ---- Phase 2: Execution ----
+
+    def create_execution(self, *, account_id: int, stock_code: str, side: str,
+                         trade_date: str, price: float, quantity: int,
+                         commission: float = 0, tax: float = 0,
+                         client_execution_id: str, note: str = "",
+                         plan_item_id: int | None = None) -> dict:
+        conn = self._conn()
+        try:
+            # 幂等:同 client_execution_id 返回已有
+            existing = conn.execute(
+                "SELECT * FROM trade_executions WHERE client_execution_id = ?",
+                (client_execution_id,),
+            ).fetchone()
+            if existing:
+                d = dict(existing)
+                d["reused"] = True
+                return d
+            cur = conn.execute(
+                "INSERT INTO trade_executions "
+                "(account_id, plan_item_id, stock_code, side, trade_date, price, quantity, "
+                " commission, tax, note, client_execution_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (account_id, plan_item_id, stock_code, side, trade_date, price, quantity,
+                 commission, tax, note, client_execution_id),
+            )
+            conn.commit()
+            d = dict(conn.execute("SELECT * FROM trade_executions WHERE id = ?",
+                                  (cur.lastrowid,)).fetchone())
+            d["reused"] = False
+            return d
+        finally:
+            conn.close()
+
+    def get_execution_by_client_id(self, client_execution_id: str) -> dict | None:
+        """按 client_execution_id 查找成交(供服务层幂等检查使用)。"""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_executions WHERE client_execution_id = ?",
+                (client_execution_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_executions(self, account_id: int, start: str | None = None,
+                        end: str | None = None) -> list[dict]:
+        clauses = ["account_id = ?"]
+        params: list = [account_id]
+        if start:
+            clauses.append("trade_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("trade_date <= ?")
+            params.append(end)
+        where = " AND ".join(clauses)
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM trade_executions WHERE {where} ORDER BY trade_date DESC, id DESC",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---- Phase 2: Equity Snapshot ----
+
+    def upsert_equity_snapshot(self, *, account_id: int, trade_date: str,
+                               cash: float, market_value: float, total_equity: float,
+                               exposure: float, peak_equity: float, drawdown: float) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO trade_equity_snapshots "
+                "(account_id, trade_date, cash, market_value, total_equity, exposure, "
+                " peak_equity, drawdown) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(account_id, trade_date) DO UPDATE SET "
+                "  cash = excluded.cash, market_value = excluded.market_value, "
+                "  total_equity = excluded.total_equity, exposure = excluded.exposure, "
+                "  peak_equity = excluded.peak_equity, drawdown = excluded.drawdown",
+                (account_id, trade_date, cash, market_value, total_equity, exposure,
+                 peak_equity, drawdown),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_equity_snapshot(self, account_id: int, trade_date: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_equity_snapshots WHERE account_id = ? AND trade_date = ?",
+                (account_id, trade_date),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_latest_equity_snapshot(self, account_id: int) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_equity_snapshots WHERE account_id = ? "
+                "ORDER BY trade_date DESC LIMIT 1",
+                (account_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    # ---- Phase 2: Audit Log ----
+
+    def write_audit_log(self, *, actor: str, action: str, entity_type: str,
+                        entity_id: str | None = None, before_json=None,
+                        after_json=None, request_id: str | None = None) -> int:
+        """写审计日志。before_json/after_json 接受 dict 或 str(自动序列化 dict)。"""
+        if isinstance(before_json, (dict, list)):
+            before_json = json.dumps(before_json, ensure_ascii=False)
+        if isinstance(after_json, (dict, list)):
+            after_json = json.dumps(after_json, ensure_ascii=False)
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO trade_audit_logs "
+                "(actor, action, entity_type, entity_id, before_json, after_json, request_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (actor, action, entity_type, entity_id, before_json, after_json, request_id),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
