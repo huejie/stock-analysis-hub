@@ -147,3 +147,115 @@ class DataHealthResponse(BaseModel):
     pool_missing_ratio: float
     issues: list[DataIssueOut]
     generated_at: str
+
+
+# ---- Phase 2: 账户/持仓/成交/净值 ----
+
+class AccountCreateRequest(BaseModel):
+    """创建账户。risk 配置字段全部有默认值(spec §8.2)。"""
+    name: str = Field(..., min_length=1, max_length=64)
+    initial_equity: float = Field(..., gt=0)
+    cash_balance: float = Field(..., ge=0)
+    risk_per_trade: float = Field(default=0.005, gt=0, le=0.05)
+    max_single_position: float = Field(default=0.15, gt=0, le=1.0)
+    max_total_exposure: float = Field(default=0.60, gt=0, le=1.0)
+    max_sector_exposure: float = Field(default=0.30, gt=0, le=1.0)
+    max_positions: int = Field(default=5, ge=1, le=20)
+    max_drawdown_limit: float = Field(default=0.08, gt=0, le=0.5)
+    is_active: bool = True
+
+
+class AccountUpdateRequest(BaseModel):
+    """更新账户(部分字段)。initial_equity 不可改。"""
+    cash_balance: float | None = Field(default=None, ge=0)
+    risk_per_trade: float | None = Field(default=None, gt=0, le=0.05)
+    max_single_position: float | None = Field(default=None, gt=0, le=1.0)
+    max_total_exposure: float | None = Field(default=None, gt=0, le=1.0)
+    max_sector_exposure: float | None = Field(default=None, gt=0, le=1.0)
+    max_positions: int | None = Field(default=None, ge=1, le=20)
+    max_drawdown_limit: float | None = Field(default=None, gt=0, le=0.5)
+    is_active: bool | None = None
+
+
+class AccountResponse(BaseModel):
+    id: int
+    name: str
+    initial_equity: float
+    cash_balance: float
+    risk_per_trade: float
+    max_single_position: float
+    max_total_exposure: float
+    max_sector_exposure: float
+    max_positions: int
+    max_drawdown_limit: float
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class PositionResponse(BaseModel):
+    id: int
+    account_id: int
+    stock_code: str
+    stock_name: str | None = None
+    quantity: int
+    available_quantity: int
+    average_cost: float
+    initial_stop: float | None = None
+    trailing_stop: float | None = None
+    opened_at: str | None = None
+    updated_at: str
+
+
+class PositionManualCorrectRequest(BaseModel):
+    """人工校正持仓(spec §12.5)。"""
+    account_id: int
+    quantity: int = Field(..., ge=0)
+    available_quantity: int = Field(..., ge=0)
+    average_cost: float = Field(..., ge=0)
+    initial_stop: float | None = None
+    trailing_stop: float | None = None
+    note: str = ""
+
+
+class ExecutionCreateRequest(BaseModel):
+    """录入成交(spec §12.5)。client_execution_id 用于幂等。"""
+    account_id: int
+    stock_code: str
+    side: str = Field(..., pattern="^(BUY|SELL)$")
+    trade_date: str  # YYYY-MM-DD
+    price: float = Field(..., gt=0)
+    quantity: int = Field(..., gt=0, multiple_of=100)  # A 股 100 股整数倍
+    commission: float = Field(default=0, ge=0)
+    tax: float = Field(default=0, ge=0)
+    note: str = ""
+    client_execution_id: str = Field(..., min_length=1)
+    plan_item_id: int | None = None
+
+
+class ExecutionResponse(BaseModel):
+    id: int
+    account_id: int
+    stock_code: str
+    side: str
+    trade_date: str
+    price: float
+    quantity: int
+    commission: float
+    tax: float
+    note: str
+    client_execution_id: str | None
+    plan_item_id: int | None
+    created_at: str
+
+
+class EquitySnapshotResponse(BaseModel):
+    account_id: int
+    trade_date: str
+    cash: float
+    market_value: float
+    total_equity: float
+    exposure: float
+    peak_equity: float
+    drawdown: float
+    created_at: str
