@@ -544,14 +544,21 @@ class TradingRepository:
             conn.close()
 
     def get_execution_by_client_id(self, client_execution_id: str) -> dict | None:
-        """按 client_execution_id 查找成交(供服务层幂等检查使用)。"""
+        """按 client_execution_id 查找成交(供服务层幂等检查使用)。
+
+        返回 dict 含 "reused": True 标记(若存在),否则 None。
+        """
         conn = self._conn()
         try:
             row = conn.execute(
                 "SELECT * FROM trade_executions WHERE client_execution_id = ?",
                 (client_execution_id,),
             ).fetchone()
-            return dict(row) if row else None
+            if row:
+                d = dict(row)
+                d["reused"] = True
+                return d
+            return None
         finally:
             conn.close()
 
