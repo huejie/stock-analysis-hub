@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useTradingApi } from '../../composables/useTradingApi'
 import type { StockPoolListItem, StockPoolVersion } from '../../types/trading'
 
@@ -11,6 +11,13 @@ const inputSource = ref<'text' | 'csv'>('text')
 const loading = ref(false)
 const error = ref('')
 const success = ref('')
+
+// placeholder 用 computed 避免模板内多行字符串 + 字符实体的解析问题
+const placeholderText = computed(() =>
+  inputSource.value === 'text'
+    ? '每行一只: 000001 平安银行\n600000 浦发银行\n300750'
+    : 'code,name\n000001,平安银行\n600000,浦发银行'
+)
 
 async function loadVersions() {
   try {
@@ -74,9 +81,7 @@ onMounted(loadVersions)
       </div>
       <textarea
         v-model="inputText"
-        :placeholder="inputSource === 'text'
-          ? '每行一只: 000001 平安银行&#10;600000 浦发银行&#10;300750'
-          : 'code,name&#10;000001,平安银行&#10;600000,浦发银行'"
+        :placeholder="placeholderText"
         rows="6"
       />
       <button class="btn-primary" :disabled="loading" @click="handleImport">
