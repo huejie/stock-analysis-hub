@@ -95,6 +95,21 @@ pytest -v  # 详细输出
 - **排除 ST 股**：数据库 `_is_st()` 方法和爬虫层面都过滤 ST 和非 A 股。
 - **异步后台任务**：股池更新等耗时操作通过 `run_in_executor` 后台执行，前端轮询状态端点获取进度。
 
+### 交易决策模块（trading，Phase 1）
+
+- **`backend/trading/`** — 独立业务模块，通过 APIRouter 注册到 main.py（仅 `include_router` 一行），不向现有路由堆叠。
+  - `router.py` — `/api/trading/*` 路由（股票池导入/查询、数据健康、数据任务）。
+  - `repository.py` — 仅操作 `trade_*` 表，不向现有 `Database` 类堆叠 SQL。每次操作短连接 + try/finally close（Windows 文件锁友好）。
+  - `migrations.py` — 独立迁移系统（显式 `trade_migrations` 版本表，幂等，禁用"捕获 ALTER 异常即忽略"的隐式迁移）。
+  - `domain.py` — 领域数据类（`DailyBar`/`Instrument`/`TradeDay`/`InstrumentStatus`/`SectorMembership`），股票代码统一 `000001.SZ` 形式；`normalize_stock_code` 接受多种输入。
+  - `clock.py` — 交易日与时区抽象（基于周末，节假日由 Provider 叠加）。
+  - `errors.py` — 领域错误码（`DATA_STALE`/`PROVIDER_UNAVAILABLE`/`PLAN_BLOCKED` 等，带 HTTP 状态映射）。
+  - `schemas.py` — Pydantic v2 请求/响应模型。
+  - `providers/` — 行情适配层：`base.py`(Protocol)、`eastmoney.py`(主源,K线走腾讯公开接口)、`akshare_provider.py`(备用,延迟加载)、`composite.py`(主备切换/重试/熔断)。
+  - `services/` — 业务服务：`pool_service.py`(股票池导入/版本化)、`market_data_service.py`(行情更新+数据质量门禁)。
+- **`trade_*` 表** — 股池版本/明细、日线行情、数据问题、任务/锁，与现有表物理隔离。WAL + foreign_keys + busy_timeout 已全局启用。
+- **Phase 1 范围**：模块骨架 + Provider 适配 + 股票池导入 + 数据健康门禁 + 5 个 API + 前端 `📊 交易决策` Tab。账户/持仓/策略/计划生成/回测在 Phase 2-5。
+
 ## 龙虎榜股池追踪
 
 信号股产生后自动进入股池追踪系统：
@@ -174,3 +189,16 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/ai/history?analysis_type=&days=` | AI 分析历史记录 |
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
+
+### 交易决策 API（Phase 1）
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/trading/stock-pools/import` | 导入股票池（文本/CSV，自动去重+版本化，相同内容幂等返回） |
+| GET | `/api/trading/stock-pools?pool_name=` | 股票池版本列表（降序） |
+| GET | `/api/trading/stock-pools/{version_id}` | 查询股票池版本明细（404 if 不存在） |
+| GET | `/api/trading/data-health?trade_date=` | 数据质量门禁报告（OK/PARTIAL/BLOCKED + 基准/池缺失/问题列表） |
+| POST | `/api/trading/data-jobs` | 创建数据任务（202，返回 job_id；Phase 1 仅记录，Phase 5 scheduler 执行） |
+| GET | `/api/trading/data-jobs/{job_id}` | 查询数据任务状态（404 if 不存在） |
+
+> 数据质量门禁判定：基准指数缺失 → BLOCKING；股票池缺失比例 > 5% → BLOCKING，== 5% → WARNING(PARTIAL)；全部就绪 → OK。Phase 1 无 scheduler，data-jobs 创建后停留在 QUEUED。

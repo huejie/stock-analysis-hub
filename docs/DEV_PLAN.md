@@ -756,3 +756,30 @@ if records:
 | 定时推送 | 接入飞书/钉钉，每天自动推送 AI 复盘 |
 | 历史回放 | 选择任意历史日期，用 AI 分析"如果那天会怎么建议" |
 | Prompt 自定义 | 用户可编辑 prompt 模板，定制分析风格 |
+
+---
+
+## Trading Decision System Phase 1 完成（2026-07-22）
+
+基于 `docs/specs/2026-07-21-trading-decision-system-design.md` 的交易决策系统 Phase 1（模块骨架与数据基础）已实现：
+
+### 已交付
+- **`backend/trading/`** 模块结构：`clock` / `domain` / `errors` / `schemas` / `repository` / `migrations` / `router`
+- **Provider 适配层**：东方财富主源（K线走腾讯公开接口）、AKShare 备用源（延迟加载）、Composite（主备切换/重试/熔断）
+- **股票池导入与版本化**：文本/CSV 输入，自动去重+规范化，items_hash 幂等，版本递增
+- **数据质量门禁**：基准指数/股票池缺失检查，OK/PARTIAL/BLOCKED 三态，5% 阈值边界
+- **5 个 API 端点** + 前端 `📊 交易决策` Tab（股票池/数据健康两个子面板）
+- **独立迁移系统**：显式 `trade_migrations` 版本表，WAL + foreign_keys + busy_timeout 全局启用
+- **测试**：Provider 契约测试、Repository/Service/API 测试，共 86 个 trading 测试，全部通过
+
+### 测试基线
+- 后端：`26 → 112 passed`（含 86 个 trading 测试，零回归）
+- 前端：`npm run build` 通过（顺带修复了 DailyView 29 个预先存在的 TS 错误）
+
+### 技术债修复（顺带）
+- `backend/database.py` `_get_conn` 启用 WAL/foreign_keys/busy_timeout（对现有表无破坏性影响）
+- `tests/test_database.py` 修复 7 个预先失败用例（`insert_record` → `insert_records`，streak 测试 date mock）
+- `DailyView.vue` 修复 29 个预先存在的 TS 错误（ReportItem union type 模板访问问题）
+
+### Phase 2 起点
+账户、持仓、成交 CRUD + 净值计算。参考设计文档第 17 章 Phase 2 与计划文件 `docs/superpowers/plans/2026-07-21-trading-phase1.md`。
