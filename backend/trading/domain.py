@@ -84,12 +84,13 @@ def normalize_stock_code(raw: str) -> str:
     # 纯 6 位数字
     digits = "".join(c for c in s if c.isdigit())
     if len(digits) == 6:
-        # 指数 000300/000905 在上交所;600/601/603/605/688 在上交所;其余在深交所
-        if digits.startswith(("0", "3")) and not digits.startswith("0003") and not digits.startswith("0009"):
-            # 000xxx 中 0003xx/0009xx 是上交所指数,其他 000/001/002/300 是深交所股票
-            if digits.startswith("0003") or digits.startswith("0009"):
-                return f"{digits}.SH"
+        # 000xxx 中 0003xx/0009xx 是上交所指数(沪深300/中证500),优先判
+        if digits.startswith(("0003", "0009")):
+            return f"{digits}.SH"
+        # 0xx/3xx(深市主板/创业板)在深交所
+        if digits.startswith(("0", "3")):
             return f"{digits}.SZ"
+        # 6xx/601/603/605/688 等在上交所
         return f"{digits}.SH"
     raise ValueError(f"无法规范化的股票代码: {raw}")
 
