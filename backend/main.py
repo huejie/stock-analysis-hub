@@ -15,10 +15,14 @@ from backend.database import Database
 from backend.lhb_crawler import crawl_lhb, update_lhb_pool
 from backend.models import UploadResult
 from backend.ocr import analyze_image
+from backend.trading.router import router as trading_router
 
 app = FastAPI(title="Stock Analysis Hub")
 
 db = Database()
+
+if settings.trading_enabled:
+    app.include_router(trading_router)
 
 # 静态文件 - Vue build output
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"

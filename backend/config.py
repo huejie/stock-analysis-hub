@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 0
     llm_temperature: float = 0.7
 
+    # 交易模块配置（文档 13.3）
+    trading_enabled: bool = True
+    trading_timezone: str = "Asia/Shanghai"
+    trading_schedule_enabled: bool = False  # Phase 1 不启用定时
+    trading_provider_priority: str = "eastmoney,akshare"
+    trading_provider_timeout_seconds: float = 20.0
+    trading_provider_max_retries: int = 3
+    trading_data_max_missing_ratio: float = 0.05
+    trading_benchmark_codes: str = "000300.SH,000905.SH"
+    trading_backup_retention_days: int = 30
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
