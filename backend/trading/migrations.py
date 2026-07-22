@@ -30,6 +30,11 @@ MIGRATION_VERSIONS: list[dict] = [
         "name": "initial_trade_tables",
         "description": "创建 Phase 1 所需的 trade_* 表(股池/日线/数据问题/任务)",
     },
+    {
+        "version": 2,
+        "name": "phase2_account_tables",
+        "description": "Phase 2 账户/持仓/成交/净值快照 + Phase 3 预建空表(保证 FK 完整性)",
+    },
 ]
 
 # 版本 1 的完整 DDL(来自设计文档第 10.2 章,只取 Phase 1 需要的表)
@@ -112,6 +117,154 @@ _MIGRATION_1_SQL = [
     )""",
 ]
 
+# 版本 2 的完整 DDL(Phase 2 主表 + Phase 3 预建空表)
+# 顺序:Phase 3 预建空表(trade_strategy_versions/trade_plan_runs/trade_plan_items)
+# 必须在 trade_executions 之前,因为 trade_executions.plan_item_id 有 FK 引用 trade_plan_items。
+# trade_stock_pool_versions Phase 1 已建,IF NOT EXISTS 保证幂等。
+_MIGRATION_2_SQL = [
+    # ---- Phase 3 预建空表(必须在 trade_executions/positions 之前,FK 依赖) ----
+    """CREATE TABLE IF NOT EXISTS trade_strategy_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_code TEXT NOT NULL,
+        version_no INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        params_json TEXT NOT NULL,
+        params_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('DRAFT','ACTIVE','RETIRED')),
+        created_at TEXT NOT NULL,
+        activated_at TEXT,
+        UNIQUE(strategy_code, version_no),
+        UNIQUE(params_hash)
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_stock_pool_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pool_name TEXT NOT NULL,
+        version_no INTEGER NOT NULL,
+        items_hash TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(pool_name, version_no),
+        UNIQUE(pool_name, items_hash)
+    )""",  # 注:此表 Phase 1 已建,IF NOT EXISTS 保证幂等
+    """CREATE TABLE IF NOT EXISTS trade_plan_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_key TEXT NOT NULL UNIQUE,
+        account_id INTEGER NOT NULL,
+        signal_date TEXT NOT NULL,
+        target_trade_date TEXT NOT NULL,
+        stock_pool_version_id INTEGER NOT NULL,
+        strategy_version_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        market_regime TEXT,
+        market_score INTEGER,
+        recommended_exposure REAL,
+        account_snapshot_json TEXT NOT NULL,
+        data_snapshot_hash TEXT NOT NULL,
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        error_json TEXT,
+        created_at TEXT NOT NULL,
+        published_at TEXT,
+        superseded_by_id INTEGER
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_plan_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_run_id INTEGER NOT NULL,
+        stock_code TEXT NOT NULL,
+        stock_name TEXT,
+        action TEXT NOT NULL,
+        score REAL,
+        rank_no INTEGER,
+        trigger_price REAL,
+        do_not_chase_price REAL,
+        stop_price REAL,
+        target_2r_price REAL,
+        suggested_quantity INTEGER NOT NULL DEFAULT 0,
+        suggested_position_pct REAL NOT NULL DEFAULT 0,
+        risk_amount REAL NOT NULL DEFAULT 0,
+        risk_pct REAL NOT NULL DEFAULT 0,
+        rule_hits_json TEXT NOT NULL DEFAULT '[]',
+        rule_misses_json TEXT NOT NULL DEFAULT '[]',
+        invalidation_reason TEXT,
+        execution_status TEXT NOT NULL DEFAULT 'PENDING',
+        created_at TEXT NOT NULL,
+        UNIQUE(plan_run_id, stock_code)
+    )""",
+    # ---- Phase 2 主表 ----
+    """CREATE TABLE IF NOT EXISTS trade_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        initial_equity REAL NOT NULL CHECK (initial_equity > 0),
+        cash_balance REAL NOT NULL CHECK (cash_balance >= 0),
+        risk_per_trade REAL NOT NULL DEFAULT 0.005,
+        max_single_position REAL NOT NULL DEFAULT 0.15,
+        max_total_exposure REAL NOT NULL DEFAULT 0.60,
+        max_sector_exposure REAL NOT NULL DEFAULT 0.30,
+        max_positions INTEGER NOT NULL DEFAULT 5,
+        max_drawdown_limit REAL NOT NULL DEFAULT 0.08,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL,
+        stock_code TEXT NOT NULL,
+        stock_name TEXT,
+        quantity INTEGER NOT NULL CHECK (quantity >= 0),
+        available_quantity INTEGER NOT NULL CHECK (available_quantity >= 0),
+        average_cost REAL NOT NULL CHECK (average_cost >= 0),
+        initial_stop REAL,
+        trailing_stop REAL,
+        opened_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(account_id, stock_code),
+        FOREIGN KEY (account_id) REFERENCES trade_accounts(id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_executions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL,
+        plan_item_id INTEGER,
+        stock_code TEXT NOT NULL,
+        side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+        trade_date TEXT NOT NULL,
+        price REAL NOT NULL CHECK (price > 0),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        commission REAL NOT NULL DEFAULT 0,
+        tax REAL NOT NULL DEFAULT 0,
+        note TEXT,
+        client_execution_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(client_execution_id),
+        FOREIGN KEY (account_id) REFERENCES trade_accounts(id),
+        FOREIGN KEY (plan_item_id) REFERENCES trade_plan_items(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_trade_executions_account_date ON trade_executions(account_id, trade_date)",
+    """CREATE TABLE IF NOT EXISTS trade_equity_snapshots (
+        account_id INTEGER NOT NULL,
+        trade_date TEXT NOT NULL,
+        cash REAL NOT NULL,
+        market_value REAL NOT NULL,
+        total_equity REAL NOT NULL,
+        exposure REAL NOT NULL,
+        peak_equity REAL NOT NULL,
+        drawdown REAL NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        PRIMARY KEY (account_id, trade_date),
+        FOREIGN KEY (account_id) REFERENCES trade_accounts(id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        request_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
+]
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
@@ -147,5 +300,15 @@ def run_migrations(db_path: str) -> None:
             )
             conn.commit()
             logger.info("trading migration v1 applied")
+
+        if 2 not in applied:
+            for stmt in _MIGRATION_2_SQL:
+                conn.execute(stmt)
+            conn.execute(
+                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
+                (2, "phase2_account_tables"),
+            )
+            conn.commit()
+            logger.info("trading migration v2 applied")
     finally:
         conn.close()
