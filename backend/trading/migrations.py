@@ -35,6 +35,11 @@ MIGRATION_VERSIONS: list[dict] = [
         "name": "phase2_account_tables",
         "description": "Phase 2 账户/持仓/成交/净值快照 + Phase 3 预建空表(保证 FK 完整性)",
     },
+    {
+        "version": 3,
+        "name": "phase3_plan_indexes",
+        "description": "Phase 3 计划表索引(FK 由应用层校验,SQLite 不支持事后加 FK)",
+    },
 ]
 
 # 版本 1 的完整 DDL(来自设计文档第 10.2 章,只取 Phase 1 需要的表)
@@ -265,6 +270,13 @@ _MIGRATION_2_SQL = [
     )""",
 ]
 
+# Phase 3: 计划表索引。
+# 注:SQLite 不支持对已存在的表事后添加 FK 约束(ALTER TABLE ADD CONSTRAINT),
+# Phase 2 预建 plan_runs/plan_items 时省略了 FK,这里只补索引;FK 完整性由应用层校验。
+_MIGRATION_3_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_trade_plan_runs_signal_date ON trade_plan_runs(signal_date, status)",
+]
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
@@ -310,5 +322,15 @@ def run_migrations(db_path: str) -> None:
             )
             conn.commit()
             logger.info("trading migration v2 applied")
+
+        if 3 not in applied:
+            for stmt in _MIGRATION_3_SQL:
+                conn.execute(stmt)
+            conn.execute(
+                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
+                (3, "phase3_plan_indexes"),
+            )
+            conn.commit()
+            logger.info("trading migration v3 applied")
     finally:
         conn.close()
