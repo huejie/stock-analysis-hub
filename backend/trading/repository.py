@@ -629,6 +629,363 @@ class TradingRepository:
         finally:
             conn.close()
 
+    # ---- Phase 3: Strategy Version ----
+
+    @staticmethod
+    def _params_hash(params_json: dict) -> str:
+        """对 params_json 计算稳定哈希(键排序 + ensure_ascii=False)[:16]。"""
+        canonical = json.dumps(params_json, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+    def create_strategy_version(self, *, strategy_code: str, name: str,
+                                params_json: dict) -> dict:
+        """创建策略版本。
+
+        params_hash = sha256(canonical_json(params))[:16]。
+        UNIQUE(params_hash) 命中则返回已有(reused=True)。
+        否则 version_no = MAX(version_no)+1(按 strategy_code),status='DRAFT'。
+        """
+        params_hash = self._params_hash(params_json)
+        params_json_str = json.dumps(params_json, ensure_ascii=False)
+        conn = self._conn()
+        try:
+            # 1. 幂等:同 params_hash 已存在则复用(全局唯一)
+            existing = conn.execute(
+                "SELECT id, version_no, status FROM trade_strategy_versions "
+                "WHERE params_hash = ?",
+                (params_hash,),
+            ).fetchone()
+            if existing:
+                return {"id": existing["id"], "version_no": existing["version_no"],
+                        "params_hash": params_hash, "status": existing["status"],
+                        "reused": True}
+
+            # 2. 计算新版本号(按 strategy_code)
+            max_ver = conn.execute(
+                "SELECT MAX(version_no) AS m FROM trade_strategy_versions "
+                "WHERE strategy_code = ?",
+                (strategy_code,),
+            ).fetchone()
+            next_ver = (max_ver["m"] or 0) + 1
+
+            cur = conn.execute(
+                "INSERT INTO trade_strategy_versions "
+                "(strategy_code, version_no, name, params_json, params_hash, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'DRAFT', datetime('now','localtime'))",
+                (strategy_code, next_ver, name, params_json_str, params_hash),
+            )
+            version_id = cur.lastrowid
+            conn.commit()
+            return {"id": version_id, "version_no": next_ver,
+                    "params_hash": params_hash, "status": "DRAFT", "reused": False}
+        finally:
+            conn.close()
+
+    def get_strategy(self, version_id: int) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_strategy_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_strategy(row)
+        finally:
+            conn.close()
+
+    def list_strategies(self, strategy_code: str | None = None) -> list[dict]:
+        conn = self._conn()
+        try:
+            if strategy_code:
+                rows = conn.execute(
+                    "SELECT * FROM trade_strategy_versions WHERE strategy_code = ? "
+                    "ORDER BY version_no ASC",
+                    (strategy_code,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM trade_strategy_versions ORDER BY strategy_code, version_no ASC"
+                ).fetchall()
+            return [self._row_to_strategy(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_active_strategy(self, strategy_code: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_strategy_versions "
+                "WHERE strategy_code = ? AND status = 'ACTIVE' "
+                "ORDER BY version_no DESC LIMIT 1",
+                (strategy_code,),
+            ).fetchone()
+            return self._row_to_strategy(row) if row else None
+        finally:
+            conn.close()
+
+    def activate_strategy(self, version_id: int) -> int | None:
+        """激活策略版本:目标→ACTIVE,同 strategy_code 其它→RETIRED。
+
+        事务内一次提交。返回之前 ACTIVE 版本的 id(或 None)。
+        """
+        conn = self._conn()
+        try:
+            target = conn.execute(
+                "SELECT strategy_code FROM trade_strategy_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+            if not target:
+                raise ValueError(f"策略版本 {version_id} 不存在")
+            code = target["strategy_code"]
+            # 找出当前 ACTIVE(若存在),用于返回
+            prev = conn.execute(
+                "SELECT id FROM trade_strategy_versions "
+                "WHERE strategy_code = ? AND status = 'ACTIVE' AND id != ? "
+                "ORDER BY version_no DESC LIMIT 1",
+                (code, version_id),
+            ).fetchone()
+            prev_id = prev["id"] if prev else None
+            # 其它版本 RETIRED
+            conn.execute(
+                "UPDATE trade_strategy_versions SET status = 'RETIRED' "
+                "WHERE strategy_code = ? AND id != ? AND status = 'ACTIVE'",
+                (code, version_id),
+            )
+            # 目标 ACTIVE
+            conn.execute(
+                "UPDATE trade_strategy_versions "
+                "SET status = 'ACTIVE', activated_at = datetime('now','localtime') "
+                "WHERE id = ?",
+                (version_id,),
+            )
+            conn.commit()
+            return prev_id
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_strategy(row) -> dict:
+        d = dict(row)
+        try:
+            d["params_json"] = json.loads(d.get("params_json") or "{}")
+        except (ValueError, TypeError):
+            d["params_json"] = {}
+        return d
+
+    # ---- Phase 3: Plan Run ----
+
+    def create_plan_run(self, *, run_key: str, account_id: int, signal_date: str,
+                        target_trade_date: str, stock_pool_version_id: int,
+                        strategy_version_id: int, status: str,
+                        account_snapshot_json: dict, data_snapshot_hash: str,
+                        warnings: list | None = None) -> dict:
+        """创建计划运行。run_key UNIQUE 命中则返回已有(reused=True)。"""
+        warnings = warnings or []
+        conn = self._conn()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM trade_plan_runs WHERE run_key = ?",
+                (run_key,),
+            ).fetchone()
+            if existing:
+                return {"id": existing["id"], "run_key": run_key, "reused": True}
+            cur = conn.execute(
+                "INSERT INTO trade_plan_runs "
+                "(run_key, account_id, signal_date, target_trade_date, "
+                " stock_pool_version_id, strategy_version_id, status, "
+                " account_snapshot_json, data_snapshot_hash, warnings_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                (run_key, account_id, signal_date, target_trade_date,
+                 stock_pool_version_id, strategy_version_id, status,
+                 json.dumps(account_snapshot_json, ensure_ascii=False),
+                 data_snapshot_hash,
+                 json.dumps(warnings, ensure_ascii=False)),
+            )
+            run_id = cur.lastrowid
+            conn.commit()
+            return {"id": run_id, "run_key": run_key, "reused": False}
+        finally:
+            conn.close()
+
+    def get_plan_run(self, run_id: int) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            return self._row_to_plan_run(row) if row else None
+        finally:
+            conn.close()
+
+    def get_plan_run_by_key(self, run_key: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE run_key = ?", (run_key,)
+            ).fetchone()
+            return self._row_to_plan_run(row) if row else None
+        finally:
+            conn.close()
+
+    def list_plan_runs(self, signal_date: str | None = None,
+                       status: str | None = None) -> list[dict]:
+        clauses = []
+        params: list = []
+        if signal_date:
+            clauses.append("signal_date = ?")
+            params.append(signal_date)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM trade_plan_runs{where} ORDER BY id DESC",
+                params,
+            ).fetchall()
+            return [self._row_to_plan_run(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_plan_run_status(self, run_id: int, status: str, *,
+                               error: dict | None = None,
+                               market_regime: str | None = None,
+                               market_score: int | None = None,
+                               recommended_exposure: float | None = None) -> None:
+        sets = ["status = ?"]
+        params: list = [status]
+        if error is not None:
+            sets.append("error_json = ?")
+            params.append(json.dumps(error, ensure_ascii=False))
+        if market_regime is not None:
+            sets.append("market_regime = ?")
+            params.append(market_regime)
+        if market_score is not None:
+            sets.append("market_score = ?")
+            params.append(market_score)
+        if recommended_exposure is not None:
+            sets.append("recommended_exposure = ?")
+            params.append(recommended_exposure)
+        params.append(run_id)
+        conn = self._conn()
+        try:
+            conn.execute(
+                f"UPDATE trade_plan_runs SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def supersede_plan_run(self, old_run_id: int, new_run_id: int) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE trade_plan_runs "
+                "SET status = 'SUPERSEDED', superseded_by_id = ? WHERE id = ?",
+                (new_run_id, old_run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def publish_plan_run(self, run_id: int) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE trade_plan_runs "
+                "SET status = 'PUBLISHED', published_at = datetime('now','localtime') "
+                "WHERE id = ?",
+                (run_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_plan_run(row) -> dict:
+        d = dict(row)
+        try:
+            d["account_snapshot"] = json.loads(d.pop("account_snapshot_json") or "{}")
+        except (ValueError, TypeError):
+            d["account_snapshot"] = {}
+        try:
+            d["warnings"] = json.loads(d.pop("warnings_json") or "[]")
+        except (ValueError, TypeError):
+            d["warnings"] = []
+        try:
+            d["error"] = json.loads(d.pop("error_json") or "null")
+        except (ValueError, TypeError):
+            d["error"] = None
+        return d
+
+    # ---- Phase 3: Plan Item ----
+
+    def create_plan_item(self, *, plan_run_id: int, stock_code: str,
+                         action: str, **kwargs) -> dict:
+        """创建计划项。可选字段缺失用 DB 默认值。
+
+        rule_hits_json/rule_misses_json 接受 list,存为 JSON TEXT。
+        invalidation_reason 接受 str。
+        """
+        rule_hits = kwargs.get("rule_hits_json", [])
+        rule_misses = kwargs.get("rule_misses_json", [])
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO trade_plan_items "
+                "(plan_run_id, stock_code, stock_name, action, score, rank_no, "
+                " trigger_price, do_not_chase_price, stop_price, target_2r_price, "
+                " suggested_quantity, suggested_position_pct, risk_amount, risk_pct, "
+                " rule_hits_json, rule_misses_json, invalidation_reason, execution_status, "
+                " created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                " datetime('now','localtime'))",
+                (plan_run_id, stock_code, kwargs.get("stock_name"), action,
+                 kwargs.get("score"), kwargs.get("rank_no"),
+                 kwargs.get("trigger_price"), kwargs.get("do_not_chase_price"),
+                 kwargs.get("stop_price"), kwargs.get("target_2r_price"),
+                 kwargs.get("suggested_quantity", 0),
+                 kwargs.get("suggested_position_pct", 0),
+                 kwargs.get("risk_amount", 0), kwargs.get("risk_pct", 0),
+                 json.dumps(rule_hits, ensure_ascii=False),
+                 json.dumps(rule_misses, ensure_ascii=False),
+                 kwargs.get("invalidation_reason"),
+                 kwargs.get("execution_status", "PENDING")),
+            )
+            item_id = cur.lastrowid
+            conn.commit()
+            return {"id": item_id, "plan_run_id": plan_run_id,
+                    "stock_code": stock_code, "action": action}
+        finally:
+            conn.close()
+
+    def get_plan_items(self, plan_run_id: int) -> list[dict]:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trade_plan_items WHERE plan_run_id = ? ORDER BY id ASC",
+                (plan_run_id,),
+            ).fetchall()
+            return [self._row_to_plan_item(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_plan_item(row) -> dict:
+        d = dict(row)
+        try:
+            d["rule_hits"] = json.loads(d.pop("rule_hits_json") or "[]")
+        except (ValueError, TypeError):
+            d["rule_hits"] = []
+        try:
+            d["rule_misses"] = json.loads(d.pop("rule_misses_json") or "[]")
+        except (ValueError, TypeError):
+            d["rule_misses"] = []
+        return d
+
     # ---- Phase 2: Audit Log ----
 
     def write_audit_log(self, *, actor: str, action: str, entity_type: str,
