@@ -38,6 +38,23 @@ from .services.execution_service import ExecutionService
 from .services.market_data_service import MarketDataService
 from .services.pool_service import PoolService
 from .services.portfolio_service import PortfolioService
+from .services.strategy_service import StrategyService
+from .services.plan_service import PlanService
+from .schemas import (
+    StrategyCreateRequest,
+    StrategyResponse,
+    StrategyActivateResponse,
+    PlanRunCreateRequest,
+    PlanRunResponse,
+    PlanRunDetailResponse,
+    PlanItemResponse,
+    PlanPublishResponse,
+)
+from .errors import (
+    PlanBlockedError,
+    PlanAlreadyPublishedError,
+    StrategyNotActiveError,
+)
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -48,6 +65,8 @@ market_data_service = MarketDataService(trading_repo, provider=None)
 account_service = AccountService(trading_repo)
 execution_service = ExecutionService(trading_repo)
 portfolio_service = PortfolioService(trading_repo)
+strategy_service = StrategyService(trading_repo)
+plan_service = PlanService(trading_repo, market_data_service, portfolio_service)
 
 
 def _benchmark_codes() -> list[str]:
@@ -258,3 +277,125 @@ async def get_equity_snapshot(account_id: int, trade_date: str = Query(...)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return EquitySnapshotResponse(**snap).model_dump()
+
+
+# ---- Phase 3: 策略 ----
+
+@router.get("/strategies")
+async def list_strategies(strategy_code: str | None = Query(default=None)):
+    """策略版本列表(可选 strategy_code 过滤,spec §11.3)。"""
+    rows = strategy_service.list_strategies(strategy_code=strategy_code)
+    return {"strategies": [StrategyResponse(**r).model_dump() for r in rows]}
+
+
+@router.post("/strategies")
+async def create_strategy(req: StrategyCreateRequest):
+    """创建策略版本(DRAFT)。params_hash 命中复用(spec §11.3)。"""
+    try:
+        created = strategy_service.create_strategy(
+            strategy_code=req.strategy_code, name=req.name,
+            params_json=req.params_json,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # 补全 Response 所需字段(create 仅返回 id/version_no/params_hash/status/reused)
+    full = strategy_service.get_strategy(created["id"])
+    return StrategyResponse(**full).model_dump()
+
+
+@router.post("/strategies/{version_id}/activate")
+async def activate_strategy(version_id: int):
+    """激活策略版本(DRAFT→ACTIVE,同 code 旧版本 RETIRED,stub 门禁 warning)。
+
+    spec §14.4:Phase 5 回测引擎就绪后启用真校验,当前只返回 warning。
+    """
+    try:
+        result = strategy_service.activate_strategy(version_id)
+    except ValueError as e:
+        # 不存在或已退役 → 区分 404 / 400
+        if "不存在" in str(e):
+            raise HTTPException(404, str(e))
+        raise HTTPException(400, str(e))
+    return StrategyActivateResponse(**result).model_dump()
+
+
+# ---- Phase 3: 计划 ----
+
+@router.post("/plan-runs")
+async def create_plan_run(req: PlanRunCreateRequest):
+    """生成计划(10 步流程 + 幂等键,spec §9/§11.3)。
+
+    幂等命中返回 reused=True 的已有 run;策略未激活 → 422;
+    数据门禁阻断 → 409;引擎异常 → 400/500。
+    """
+    try:
+        result = plan_service.generate_plan(
+            account_id=req.account_id, signal_date=req.signal_date,
+            stock_pool_version_id=req.stock_pool_version_id,
+            strategy_version_id=req.strategy_version_id,
+            force_new_version=req.force_new_version,
+        )
+    except StrategyNotActiveError as e:
+        raise e.to_http_exception()
+    except PlanBlockedError as e:
+        raise e.to_http_exception()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return PlanRunResponse(
+        id=result["id"], run_key=result["run_key"], status=result["status"],
+        signal_date=result["signal_date"],
+        target_trade_date=result["target_trade_date"],
+        reused=result["reused"],
+    ).model_dump()
+
+
+@router.get("/plan-runs")
+async def list_plan_runs(signal_date: str | None = Query(default=None),
+                         status: str | None = Query(default=None)):
+    """计划运行列表(可选 signal_date/status 过滤,spec §11.3)。"""
+    rows = trading_repo.list_plan_runs(signal_date=signal_date, status=status)
+    return {"plan_runs": rows}
+
+
+@router.get("/plan-runs/{run_id}")
+async def get_plan_run_detail(run_id: int):
+    """计划详情 + 全部明细(spec §11.4)。"""
+    detail = plan_service.get_plan_detail(run_id)
+    if detail is None:
+        raise HTTPException(404, f"计划 {run_id} 不存在")
+    items = [PlanItemResponse(**it).model_dump() for it in detail["items"]]
+    return PlanRunDetailResponse(
+        id=detail["id"], status=detail["status"],
+        signal_date=detail["signal_date"],
+        target_trade_date=detail["target_trade_date"],
+        market_regime=detail.get("market_regime"),
+        market_score=detail.get("market_score"),
+        degraded=detail.get("degraded", False),
+        recommended_exposure=detail.get("recommended_exposure"),
+        warnings=detail.get("warnings", []),
+        items=items,
+        created_at=detail.get("created_at"),
+        published_at=detail.get("published_at"),
+    ).model_dump()
+
+
+@router.post("/plan-runs/{run_id}/publish")
+async def publish_plan_run(run_id: int):
+    """发布计划(READY/PARTIAL→PUBLISHED,spec §9.2/§11.4)。
+
+    已发布 → 409 PLAN_ALREADY_PUBLISHED;非就绪 → 409 PLAN_BLOCKED。
+    """
+    try:
+        result = plan_service.publish_plan(run_id)
+    except PlanAlreadyPublishedError as e:
+        raise e.to_http_exception()
+    except PlanBlockedError as e:
+        raise e.to_http_exception()
+    except ValueError as e:
+        if "不存在" in str(e):
+            raise HTTPException(404, str(e))
+        raise HTTPException(400, str(e))
+    return PlanPublishResponse(
+        id=result["id"], status=result["status"],
+        published_at=result["published_at"],
+    ).model_dump()
