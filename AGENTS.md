@@ -114,7 +114,12 @@ pytest -v  # 详细输出
   - `services/account_service.py` — 账户 CRUD + 唯一 active 约束（单主账户）+ 审计日志。
   - `services/execution_service.py` — 成交录入 + 原子更新（现金/持仓/审计）+ T+1（买入当日 available=0，`roll_t1_available` 懒滚动）+ `client_execution_id` 幂等。
   - `services/portfolio_service.py` — 净值快照（cash/market_value/total_equity/exposure/peak_equity/drawdown）+ 行业暴露聚合 + `check_risk_limits`（总仓位/单股/行业/数量/回撤 5 类限制）。
-- 策略/计划生成/回测/前端账户面板在 Phase 3-5。
+- **Phase 3 范围（已交付）**：策略/计划引擎——市场状态分类、股票评分、入场/退出规则、指标计算、策略版本化、计划生成状态机与幂等键。
+  - `strategies/` — 纯函数策略模块：`market_regime`(M1-M5 打分/regime 映射)、`scoring`(5 维度评分封顶 100)、`entry_rules`(6 条件 CONDITIONAL_BUY + 触发价/追高价/2R)、`exit_rules`(6 级优先 + 移动止损单调/趋势失效/+2R)。
+  - `services/indicator_service.py` — MA/ATR/分位数/波动率纯 Python 实现（防未来函数：调用方只传到 t 的 K 线）。
+  - `services/strategy_service.py` — 策略版本 CRUD + DRAFT→ACTIVE→RETIRED 状态机（激活门禁 stub，Phase 5 启用真校验）。
+  - `services/plan_service.py` — 10 步生成流程（持仓优先→候选评分→入场→仓位→风控→固化）+ CREATED→VALIDATING→GENERATING→READY→PUBLISHED 状态机 + SHA256 幂等键（同输入复用，输入变化 SUPERSEDE 旧计划）。
+- 回测/复盘/Scheduler/前端计划面板在 Phase 4-5。
 
 ## 龙虎榜股池追踪
 
@@ -196,7 +201,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
 
-### 交易决策 API（Phase 1 + Phase 2）
+### 交易决策 API（Phase 1 + Phase 2 + Phase 3）
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -224,3 +229,17 @@ BAIDU_OCR_SECRET_KEY=xxx
 | GET | `/api/trading/equity-snapshots/{account_id}?trade_date=` | 净值快照（含 peak/drawdown，持仓缺行情 → 400） |
 
 > T+1：买入当日 `available_quantity=0`，`roll_t1_available` 在新交易日首次访问时懒滚动。成交幂等靠 `client_execution_id` UNIQUE。仓位计算（`position_sizing.py`）为纯函数，Phase 3 注入市场状态/regime 参数。
+
+**Phase 3（策略/计划）：**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/trading/strategies?strategy_code=` | 策略版本列表 |
+| POST | `/api/trading/strategies` | 创建草稿版本（params_json 版本化） |
+| POST | `/api/trading/strategies/{id}/activate` | 激活策略（同 code 旧的 RETIRED；门禁 stub） |
+| POST | `/api/trading/plan-runs` | 创建/复用计划生成（SHA256 幂等键，返回 run_key） |
+| GET | `/api/trading/plan-runs?signal_date=&status=` | 计划列表 |
+| GET | `/api/trading/plan-runs/{id}` | 计划详情（regime/score/items，spec §11.4 形状） |
+| POST | `/api/trading/plan-runs/{id}/publish` | 人工确认发布（READY→PUBLISHED，不可逆） |
+
+> 计划生成 10 步（spec §9.1）：锁定输入→数据门禁→市场状态→持仓退出→候选评分→入场→仓位→风控→固化→幂等。状态机 CREATED→VALIDATING→GENERATING→READY/PARTIAL→PUBLISHED，异常 BLOCKED/FAILED。幂等键 = SHA256(signal_date + account + pool + strategy + data hashes)；同键复用，输入变化 SUPERSEDE。防未来函数：指标只用 `trade_date <= signal_date` 的 K 线。

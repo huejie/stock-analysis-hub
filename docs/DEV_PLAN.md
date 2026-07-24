@@ -816,3 +816,40 @@ if records:
 
 ### Phase 3 起点
 市场状态分类、股票评分、入场/退出规则、ATR/MA 指标、计划生成状态机、幂等键。Phase 2 的 `position_sizing.py` 纯函数已为 Phase 3 注入市场状态参数做好准备。
+
+---
+
+## Trading Decision System Phase 3 完成（2026-07-24）
+
+基于 `docs/specs/2026-07-21-trading-decision-system-design.md` 第 17 章 Phase 3（策略、计划和幂等）已实现。
+
+### 已交付
+- **Migration v3**：`idx_trade_plan_runs_signal_date` 索引（FK 由应用层校验，SQLite 不支持事后加 FK）。
+- **指标计算**（`indicator_service.py`）：MA20/MA60/ATR14/分位数/已实现波动率，纯 Python 无 pandas 依赖，防未来函数（调用方只传到 t 的 K 线）。
+- **市场状态分类**（`strategies/market_regime.py`）：M1-M5 打分（收盘>MA20/MA20>MA60/宽度55%/波动80分位/收盘<MA60），映射 ATTACK(60%)/NEUTRAL(40%)/DEFENSE(20%)，宽度缺失降级 degraded=True。
+- **股票评分**（`strategies/scoring.py`）：5 维度（中期趋势30/短期动量20/量价结构20/波动风险15/相对强弱15）+ 辅助加分上限10，总分封顶100。
+- **入场规则**（`strategies/entry_rules.py`）：6 条件 CONDITIONAL_BUY（市场非DEFENSE/评分≥70/近高点/止损3-10%/组合额度/量价），触发价=max(breakout,信号日高)+tick，追高价=触发价×1.03，2R目标。
+- **退出规则**（`strategies/exit_rules.py`）：6 级优先（强制/初始止损/移动止损/趋势失效/+2R/再平衡），移动止损 max(上一日,最高收盘-2.5ATR) 单调非递减。
+- **策略版本化**（`strategy_service.py`）：DRAFT→ACTIVE→RETIRED 状态机，params_hash 幂等，同 code 仅一个 ACTIVE，激活门禁 stub（Phase 5 启用真校验）。
+- **计划生成**（`plan_service.py`）：10 步流程（锁定→门禁→市场状态→持仓退出→候选评分→入场→仓位→风控→固化→幂等），状态机 CREATED→VALIDATING→GENERATING→READY/PARTIAL→PUBLISHED，SHA256 幂等键（同输入复用，变化 SUPERSEDE），持仓优先于候选。
+- **7 个新 API 端点**：strategies CRUD/activate、plan-runs create/list/detail/publish。
+- **无未来函数回归测试**：指标层 + 计划层双重验证。
+
+### 测试基线
+- 后端：`231 → 299 passed`（+68 个 Phase 3 测试，零回归）
+
+### 完成标准达成（spec §17 Phase 3）
+> "同一输入稳定生成相同计划，异常数据会阻断，所有建议可解释。"
+
+✅ 幂等键稳定性（SHA256，同输入 reused=True）。✅ 数据门禁阻断（BLOCKED 不生成新开仓）。✅ 每条建议有 rule_hits/rule_misses/invalidation_reason。✅ 防未来函数（指标只用 ≤ signal_date 数据）。
+
+### 关键设计决策（spec gap 填补）
+- 指标用纯 Python（无 pandas），ATR 用简单平均（spec 未指定平滑）。
+- 策略激活门禁 stub（spec §14.4 依赖 Phase 5 回测）。
+- 辅助信号加分默认 0（热榜/龙虎榜接入在 Phase 4+，回测统计在 Phase 5）。
+- 市场宽度 M3 默认 None（降级模式，spec 允许）。
+- A 股 tick=0.01 元（spec §8.6 未给值）。
+- migration v3 只补索引（SQLite 不支持事后加 FK，FK 由应用层校验）。
+
+### Phase 4 起点
+前端交易决策界面：trading Tab 扩展（账户/持仓/计划/策略设置面板），响应式 + 风险提示。Phase 3 的 API 已就绪。

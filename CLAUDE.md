@@ -108,7 +108,8 @@ pytest -v  # 详细输出
 - **`trade_*` 表** — 股池版本/明细、日线行情、数据问题、任务，与现有表物理隔离。
 - **Phase 1 范围**：骨架 + Provider + 股票池 + 数据健康 + 前端 Tab。
 - **Phase 2 范围（已交付）**：账户/持仓/成交 CRUD + T+1 + 净值快照（peak/drawdown）+ 仓位计算纯函数 + 账户级风险限制。`position_sizing.py`/`account_service.py`/`execution_service.py`/`portfolio_service.py`。
-- 策略/计划生成/回测/前端账户面板在 Phase 3-5。
+- **Phase 3 范围（已交付）**：策略/计划引擎。`strategies/`(market_regime/scoring/entry_rules/exit_rules 纯函数)、`indicator_service`(MA/ATR 纯 Python 防未来函数)、`strategy_service`(版本+激活状态机)、`plan_service`(10 步生成+状态机+幂等键)。
+- 回测/复盘/Scheduler/前端计划面板在 Phase 4-5。
 
 ## 龙虎榜股池追踪
 
@@ -190,7 +191,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
 
-### 交易决策 API（Phase 1 + Phase 2）
+### 交易决策 API（Phase 1 + Phase 2 + Phase 3）
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -214,3 +215,14 @@ BAIDU_OCR_SECRET_KEY=xxx
 | POST | `/api/trading/executions` | 录入成交（原子更新 + client_execution_id 幂等） |
 | GET | `/api/trading/executions?account_id=&start=&end=` | 成交记录 |
 | GET | `/api/trading/equity-snapshots/{account_id}?trade_date=` | 净值快照（peak/drawdown） |
+
+**Phase 3（策略/计划）：**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/trading/strategies` | 策略版本列表 |
+| POST | `/api/trading/strategies` | 创建草稿版本 |
+| POST | `/api/trading/strategies/{id}/activate` | 激活策略（门禁 stub） |
+| POST | `/api/trading/plan-runs` | 创建/复用计划（幂等键） |
+| GET | `/api/trading/plan-runs/{id}` | 计划详情 |
+| POST | `/api/trading/plan-runs/{id}/publish` | 发布计划 |
