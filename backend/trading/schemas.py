@@ -260,3 +260,95 @@ class EquitySnapshotResponse(BaseModel):
     peak_equity: float
     drawdown: float
     created_at: str
+
+
+# ---- Phase 3: 策略/计划 ----
+
+class StrategyCreateRequest(BaseModel):
+    """创建策略版本(DRAFT)。params_json 存储全部策略参数(spec §8.2/§13.3)。"""
+    strategy_code: str = Field(..., min_length=1, max_length=32)
+    name: str = Field(..., min_length=1, max_length=64)
+    params_json: dict
+    notes: str = ""
+
+
+class StrategyResponse(BaseModel):
+    id: int
+    strategy_code: str
+    version_no: int
+    name: str
+    params_json: dict
+    params_hash: str
+    status: str  # DRAFT / ACTIVE / RETIRED
+    created_at: str
+    activated_at: str | None = None
+
+
+class StrategyActivateResponse(BaseModel):
+    id: int
+    status: str
+    warnings: list[str]
+    retired_previous_id: int | None = None
+
+
+class PlanRunCreateRequest(BaseModel):
+    """创建计划生成任务(spec §11.3)。"""
+    account_id: int
+    signal_date: str
+    stock_pool_version_id: int
+    strategy_version_id: int
+    force_new_version: bool = False
+
+
+class PlanRunResponse(BaseModel):
+    """创建计划响应(spec §11.3)。"""
+    id: int
+    run_key: str
+    status: str
+    signal_date: str
+    target_trade_date: str
+    reused: bool
+
+
+class PlanItemResponse(BaseModel):
+    """计划明细项(spec §11.4)。"""
+    id: int
+    stock_code: str
+    stock_name: str | None = None
+    action: str
+    score: float | None = None
+    rank_no: int | None = None
+    trigger_price: float | None = None
+    do_not_chase_price: float | None = None
+    stop_price: float | None = None
+    target_2r_price: float | None = None
+    suggested_quantity: int = 0
+    suggested_position_pct: float = 0
+    risk_amount: float = 0
+    risk_pct: float = 0
+    rule_hits: list = []
+    rule_misses: list = []
+    invalidation_reason: str | None = None
+    execution_status: str = "PENDING"
+
+
+class PlanRunDetailResponse(BaseModel):
+    """计划详情(spec §11.4)。"""
+    id: int
+    status: str
+    signal_date: str
+    target_trade_date: str
+    market_regime: str | None = None
+    market_score: int | None = None
+    degraded: bool = False
+    recommended_exposure: float | None = None
+    warnings: list[str] = []
+    items: list[PlanItemResponse] = []
+    created_at: str
+    published_at: str | None = None
+
+
+class PlanPublishResponse(BaseModel):
+    id: int
+    status: str  # PUBLISHED
+    published_at: str
