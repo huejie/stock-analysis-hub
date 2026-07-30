@@ -40,6 +40,11 @@ MIGRATION_VERSIONS: list[dict] = [
         "name": "phase3_plan_indexes",
         "description": "Phase 3 计划表索引(FK 由应用层校验,SQLite 不支持事后加 FK)",
     },
+    {
+        "version": 4,
+        "name": "phase5_backtest_tables",
+        "description": "Phase 5 回测表(backtest_runs + backtest_trades)",
+    },
 ]
 
 # 版本 1 的完整 DDL(来自设计文档第 10.2 章,只取 Phase 1 需要的表)
@@ -277,6 +282,42 @@ _MIGRATION_3_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_trade_plan_runs_signal_date ON trade_plan_runs(signal_date, status)",
 ]
 
+# Phase 5: 回测表(spec §10.2)。
+# trade_jobs(Phase 1 已建)作为 backtest_runs.job_id 的 FK 目标(应用层校验)。
+_MIGRATION_4_SQL = [
+    """CREATE TABLE IF NOT EXISTS trade_backtest_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL UNIQUE,
+        strategy_version_id INTEGER NOT NULL,
+        stock_pool_version_id INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        initial_equity REAL NOT NULL,
+        fee_params_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metrics_json TEXT,
+        equity_curve_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        finished_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS trade_backtest_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        backtest_run_id INTEGER NOT NULL,
+        stock_code TEXT NOT NULL,
+        signal_date TEXT NOT NULL,
+        entry_date TEXT,
+        entry_price REAL,
+        exit_date TEXT,
+        exit_price REAL,
+        quantity INTEGER,
+        pnl REAL,
+        r_multiple REAL,
+        exit_reason TEXT,
+        details_json TEXT NOT NULL DEFAULT '{}'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_trade_backtest_trades_run ON trade_backtest_trades(backtest_run_id)",
+]
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
@@ -332,5 +373,15 @@ def run_migrations(db_path: str) -> None:
             )
             conn.commit()
             logger.info("trading migration v3 applied")
+
+        if 4 not in applied:
+            for stmt in _MIGRATION_4_SQL:
+                conn.execute(stmt)
+            conn.execute(
+                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
+                (4, "phase5_backtest_tables"),
+            )
+            conn.commit()
+            logger.info("trading migration v4 applied")
     finally:
         conn.close()
