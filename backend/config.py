@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     trading_data_max_missing_ratio: float = 0.05
     trading_benchmark_codes: str = "000300.SH,000905.SH"
     trading_backup_retention_days: int = 30
+    trading_plan_cron: str = "25 20 * * 1-5"  # spec §13.3 计划定时刻
 
     class Config:
         env_file = ".env"

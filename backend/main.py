@@ -53,6 +53,16 @@ async def admin():
     return FileResponse(str(frontend_legacy / "index.html"))
 
 
+@app.get("/api/health")
+async def health_check():
+    """健康检查(spec §13.5):Web + 数据库。"""
+    try:
+        db.execute("SELECT 1")
+        return {"status": "ok", "db": "ok"}
+    except Exception as e:
+        return {"status": "degraded", "db": "error", "detail": str(e)}
+
+
 @app.post("/api/upload")
 async def upload_image(file: UploadFile = File(...)):
     """上传图片并调用百度 OCR 识别。"""
