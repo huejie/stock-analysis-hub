@@ -176,7 +176,7 @@ def test_do_not_chase_skips_fill(bt):
 def test_t_plus1_buy_day_not_sold(bt):
     """T+1:买入当日不能卖(spec §14.2)。
 
-    构造一个买入后立即触发止损的情形:由于 T+1,买入当日不会被平仓。
+    强不变量:除末日强平外,exit_date 必须严格晚于 entry_date(至少跨一个交易日)。
     """
     repo, svc, strat, pool = bt
     end = date(2026, 7, 22)
@@ -185,13 +185,37 @@ def test_t_plus1_buy_day_not_sold(bt):
         strategy_version_id=strat["id"], stock_pool_version_id=pool["id"],
         start_date=date(2026, 6, 1), end_date=end, initial_equity=100_000,
     )
-    # 所有 entry_date 之后至少跨一个交易日才会出现 EXIT/FORCE_CLOSE
     for t in result["trades"]:
         assert t["exit_date"] is not None
-        # exit_date >= entry_date;若 entry_date == exit_date 只可能是末日强平
-        # 且不会是止损退出(T+1 阻止)
-        if t["exit_reason"] not in ("FORCE_CLOSE_AT_END",):
-            assert t["exit_date"] >= t["entry_date"]
+        # 末日强平允许 exit_date == entry_date;其它退出必须严格晚于 entry_date(T+1)
+        if t["exit_reason"] != "FORCE_CLOSE_AT_END":
+            assert t["exit_date"] > t["entry_date"], (
+                f"T+1 违规: {t['stock_code']} entry {t['entry_date']} "
+                f"exit {t['exit_date']} reason {t['exit_reason']}"
+            )
+
+
+def test_t_plus1_stop_hit_on_entry_day_holds(bt):
+    """T+1 边界:即使 entry 当日(t+1)触及止损,也不会在当日平仓。
+
+    构造一个明确序列:信号日 t 触发买入,t+1(=entry_date)开盘即跌破止损,
+    但 T+1 禁止当日卖出 → 该笔最早在 t+2 才能平仓。
+    """
+    repo, svc, strat, pool = bt
+    end = date(2026, 7, 10)
+    # 基准 + 股票上升趋势到 end,产生信号
+    warmup_start = date(2026, 6, 1) - timedelta(days=130)
+    n = (end - warmup_start).days + 1
+    repo.upsert_daily_bars(_gen_bars(BENCHMARK, end, n, 3000.0, slope=0.003))
+    repo.upsert_daily_bars(_gen_bars("000001.SZ", end, 70, 10.0, slope=0.004))
+    result = svc.run_backtest(
+        strategy_version_id=strat["id"], stock_pool_version_id=pool["id"],
+        start_date=date(2026, 6, 1), end_date=end, initial_equity=100_000,
+    )
+    # 核查:没有任何交易的 exit_date == entry_date 且 reason 非 FORCE_CLOSE
+    for t in result["trades"]:
+        if t["exit_reason"] != "FORCE_CLOSE_AT_END":
+            assert t["exit_date"] > t["entry_date"]
 
 
 def test_fees_deducted_from_cash(bt):

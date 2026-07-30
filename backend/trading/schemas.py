@@ -352,3 +352,77 @@ class PlanPublishResponse(BaseModel):
     id: int
     status: str  # PUBLISHED
     published_at: str
+
+
+# ---- Phase 5: 回测 / 复盘 ----
+
+class FeeParams(BaseModel):
+    """成交费用参数(spec §14.2)。全部可选,缺省由 BacktestService 填默认。"""
+    commission_rate: float | None = Field(default=None, ge=0, le=0.05)
+    min_commission: float | None = Field(default=None, ge=0)
+    stamp_tax: float | None = Field(default=None, ge=0, le=0.05)
+    slippage: float | None = Field(default=None, ge=0)
+
+
+class BacktestCreateRequest(BaseModel):
+    """创建回测任务(spec §11.2 POST /backtests)。同步运行(Phase 5)。"""
+    strategy_version_id: int
+    stock_pool_version_id: int
+    start_date: str   # YYYY-MM-DD
+    end_date: str     # YYYY-MM-DD
+    initial_equity: float = Field(default=100_000, gt=0)
+    fee_params: FeeParams | None = None
+
+
+class BacktestTradeResponse(BaseModel):
+    """单笔回测交易(spec §10.2 trade_backtest_trades)。"""
+    id: int
+    stock_code: str
+    signal_date: str
+    entry_date: str | None = None
+    entry_price: float | None = None
+    exit_date: str | None = None
+    exit_price: float | None = None
+    quantity: int | None = None
+    pnl: float | None = None
+    r_multiple: float | None = None
+    exit_reason: str | None = None
+    details: dict = {}
+
+
+class BacktestRunResponse(BaseModel):
+    """回测运行 + 指标(spec §11.2 GET /backtests/{id})。"""
+    id: int
+    job_id: int
+    strategy_version_id: int
+    stock_pool_version_id: int
+    start_date: str
+    end_date: str
+    initial_equity: float
+    fee_params: dict
+    status: str
+    metrics: dict | None = None
+    equity_curve: list | None = None
+    trades: list[BacktestTradeResponse] = []
+    created_at: str
+    finished_at: str | None = None
+
+
+class ReviewSummaryResponse(BaseModel):
+    """复盘摘要(spec §11.2 GET /reviews/summary)。"""
+    account_id: int
+    period: int
+    start_date: str
+    end_date: str
+    trade_count: int
+    win_rate: float
+    avg_win_r: float
+    avg_loss_r: float
+    expectancy: float
+    profit_factor: float | None = None
+    max_drawdown: float
+    execution_rate: float
+    executed_count: int
+    total_signals: int
+    gross_profit: float
+    gross_loss: float

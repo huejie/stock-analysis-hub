@@ -256,13 +256,14 @@ class BacktestService:
         peak_equity = initial_equity
         max_drawdown = 0.0
 
-        prev_t: date | None = None
         for idx, t in enumerate(trade_dates):
-            # ---- T+1 滚动:跨交易日则所有持仓变可卖 ----
-            if prev_t is not None and t != prev_t:
-                for p in positions:
-                    p.available = True
-            prev_t = t
+            # ---- T+1 滚动:持仓在 entry_date 之后的第一个交易日才可卖 ----
+            # (买入当日 t+1 不可卖;entry_date = t+1,故 t+2 起可卖)。
+            for p in positions:
+                if not p.available:
+                    entry_d = date.fromisoformat(p.entry_date)
+                    if t > entry_d:
+                        p.available = True
 
             t_bars = self._slice_up_to(bars_by_code, benchmark_code, t)
             bm_bars = t_bars

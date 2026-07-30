@@ -40,6 +40,8 @@ from .services.pool_service import PoolService
 from .services.portfolio_service import PortfolioService
 from .services.strategy_service import StrategyService
 from .services.plan_service import PlanService
+from .services.backtest_service import BacktestService
+from .services.review_service import ReviewService
 from .schemas import (
     StrategyCreateRequest,
     StrategyResponse,
@@ -49,6 +51,10 @@ from .schemas import (
     PlanRunDetailResponse,
     PlanItemResponse,
     PlanPublishResponse,
+    BacktestCreateRequest,
+    BacktestRunResponse,
+    BacktestTradeResponse,
+    ReviewSummaryResponse,
 )
 from .errors import (
     PlanBlockedError,
@@ -67,6 +73,8 @@ execution_service = ExecutionService(trading_repo)
 portfolio_service = PortfolioService(trading_repo)
 strategy_service = StrategyService(trading_repo)
 plan_service = PlanService(trading_repo, market_data_service, portfolio_service)
+backtest_service = BacktestService(trading_repo)
+review_service = ReviewService(trading_repo)
 
 
 def _benchmark_codes() -> list[str]:
@@ -399,3 +407,72 @@ async def publish_plan_run(run_id: int):
         id=result["id"], status=result["status"],
         published_at=result["published_at"],
     ).model_dump()
+
+
+# ---- Phase 5: 回测 ----
+
+@router.post("/backtests")
+async def create_backtest(req: BacktestCreateRequest):
+    """创建并同步运行回测(spec §11.2 POST /backtests;Phase 5 同步返回 200)。
+
+    spec §11.1 说异步任务返回 202,但 Phase 5 无异步任务队列,小型 fixture 回测
+    很快,故同步运行并直接返回结果。错误:策略/池不存在 → 400;日期非法 → 400。
+    """
+    fee_params = None
+    if req.fee_params is not None:
+        fee_params = req.fee_params.model_dump(exclude_none=True)
+    try:
+        result = backtest_service.run_backtest(
+            strategy_version_id=req.strategy_version_id,
+            stock_pool_version_id=req.stock_pool_version_id,
+            start_date=req.start_date, end_date=req.end_date,
+            initial_equity=req.initial_equity, fee_params=fee_params,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return BacktestRunResponse(
+        id=result["id"], job_id=result["job_id"],
+        strategy_version_id=result["strategy_version_id"],
+        stock_pool_version_id=result["stock_pool_version_id"],
+        start_date=result["start_date"], end_date=result["end_date"],
+        initial_equity=result["initial_equity"], fee_params=result["fee_params"],
+        status=result["status"], metrics=result["metrics"],
+        equity_curve=result["equity_curve"],
+        trades=[BacktestTradeResponse(**t) for t in result["trades"]],
+        created_at=result["created_at"], finished_at=result.get("finished_at"),
+    ).model_dump()
+
+
+@router.get("/backtests/{run_id}")
+async def get_backtest(run_id: int):
+    """查询回测状态 + 指标 + 交易(spec §11.2)。"""
+    result = backtest_service.get_backtest(run_id)
+    if result is None:
+        raise HTTPException(404, f"回测 {run_id} 不存在")
+    return BacktestRunResponse(
+        id=result["id"], job_id=result["job_id"],
+        strategy_version_id=result["strategy_version_id"],
+        stock_pool_version_id=result["stock_pool_version_id"],
+        start_date=result["start_date"], end_date=result["end_date"],
+        initial_equity=result["initial_equity"], fee_params=result["fee_params"],
+        status=result["status"], metrics=result["metrics"],
+        equity_curve=result["equity_curve"],
+        trades=[BacktestTradeResponse(**t) for t in result["trades"]],
+        created_at=result["created_at"], finished_at=result.get("finished_at"),
+    ).model_dump()
+
+
+# ---- Phase 5: 复盘 ----
+
+@router.get("/reviews/summary")
+async def review_summary(account_id: int = Query(...),
+                         period: int = Query(default=30, gt=0)):
+    """复盘摘要(spec §11.2 GET /reviews/summary)。
+
+    账户不存在 → 400;period <= 0 → 422(由 Query gt=0 保证)。
+    """
+    try:
+        result = review_service.get_summary(account_id=account_id, period=period)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ReviewSummaryResponse(**result).model_dump()
