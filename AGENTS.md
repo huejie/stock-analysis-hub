@@ -126,7 +126,15 @@ pytest -v  # 详细输出
   - `components/trading/AccountPanel.vue` + `PortfolioPanel.vue` — 账户 CRUD + 持仓/成交录入（client_execution_id UUID 幂等）+ 净值快照。
   - `components/trading/StrategySettingsPanel.vue` — 策略版本/参数表（默认值/范围/风险解释）/草稿创建/激活（stub 警告）/高风险参数二次确认。
   - `composables/useFormat.ts` — 统一金额/百分比/价格/数量格式化（spec §12.7）。
-- 回测/复盘/Scheduler 在 Phase 5。
+- **Phase 5 范围（已交付）**：回测引擎 + 复盘 + 激活门禁真校验 + Scheduler + Docker/Nginx 模板 + 健康检查 + 备份。
+  - `services/backtest_service.py` — 回测引擎（防未来函数/保守止损顺序/T+1/费用模型/指标统计 spec §14）。
+  - `services/review_service.py` — 复盘统计（胜率/R/期望值/回撤/执行率）。
+  - `strategy_service.py` — 激活门禁真校验（≥100 笔/期望值>0/PF>1/回撤/集中度 spec §14.4），替换 Phase 3 stub。
+  - `jobs/scheduler.py` — 纯 Python 循环调度（20:15 更新/20:25 计划/23:30 备份，trade_job_locks 互斥，3 次重试）。
+  - `jobs/backup_database.py` — SQLite online backup API + 30 天保留 + 完整性检查。
+  - `/api/health` — Web + DB 健康检查。
+  - `docker-compose.yml` + `deploy/nginx.conf` — web + scheduler + nginx(HTTPS/Basic Auth 模板)。
+- 不做（后续）：结构化日志/Provider 指标、分组表现/基准对比、周备份分级、实际部署验证/恢复演练。
 
 ## 龙虎榜股池追踪
 
@@ -208,7 +216,7 @@ BAIDU_OCR_SECRET_KEY=xxx
 
 > AI 分析采用"离线生成 + 在线读取"模式：`export_ai_data.py` 导出数据，由 Hermes（或 LLM）生成分析后通过 `POST /api/ai/import` 写入数据库；前端只通过 GET 读取。在线生成路径（ai_engine.py / llm_client.py）已实现但未接入路由。
 
-### 交易决策 API（Phase 1 + Phase 2 + Phase 3）
+### 交易决策 API（Phase 1-5）
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -250,3 +258,13 @@ BAIDU_OCR_SECRET_KEY=xxx
 | POST | `/api/trading/plan-runs/{id}/publish` | 人工确认发布（READY→PUBLISHED，不可逆） |
 
 > 计划生成 10 步（spec §9.1）：锁定输入→数据门禁→市场状态→持仓退出→候选评分→入场→仓位→风控→固化→幂等。状态机 CREATED→VALIDATING→GENERATING→READY/PARTIAL→PUBLISHED，异常 BLOCKED/FAILED。幂等键 = SHA256(signal_date + account + pool + strategy + data hashes)；同键复用，输入变化 SUPERSEDE。防未来函数：指标只用 `trade_date <= signal_date` 的 K 线。
+
+**Phase 5（回测/复盘/部署）：**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/trading/backtests` | 运行回测（同步返回指标+交易明细） |
+| GET | `/api/trading/backtests/{run_id}` | 查询回测结果 |
+| GET | `/api/trading/reviews/summary?account_id=&period=` | 复盘摘要（胜率/R/期望值/回撤/执行率） |
+
+> 回测引擎防未来函数（只用 ≤t K 线），保守止损顺序（同日触及止损+止盈→止损先），费用参数化。激活门禁真校验（≥100 笔/期望值>0/PF>1/回撤/集中度）。Scheduler 纯 Python 循环（20:15/20:25/23:30），`/api/health` 检查 Web+DB。

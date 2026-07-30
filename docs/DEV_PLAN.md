@@ -887,3 +887,46 @@ if records:
 
 ### Phase 5 起点
 回测引擎、复盘统计、Scheduler 定时、Docker Compose、Nginx/HTTPS、备份恢复。
+
+---
+
+## Trading Decision System Phase 5 完成（2026-07-25）— 全 5 阶段交付
+
+基于 `docs/specs/2026-07-21-trading-decision-system-design.md` 第 17 章 Phase 5（回测、复盘和部署）已实现。
+
+### 已交付（核心）
+- **回测引擎**（`backtest_service.py`，spec §14）：防未来函数（只用 ≤t K 线）、日线成交模拟（gap 开盘/触发价成交/保守止损顺序/T+1/停牌/一字板/费用参数化）、指标统计（交易数/胜率/R/期望值/盈利因子/累计&年化收益/最大回撤/连续盈亏）。
+- **复盘统计**（`review_service.py`）：基于实际成交的胜率/R/期望值/回撤/执行率。
+- **激活门禁真校验**（§14.4）：≥100 笔交易 + 期望值>0 + PF>1 + 回撤不超限 + 无集中度，替换 Phase 3 stub。
+- **3 个新 API 端点**：/backtests（运行+查询）、/reviews/summary。
+
+### 已交付（附加）
+- **Scheduler**（`jobs/scheduler.py`）：纯 Python 循环，时间表 20:15/20:25/23:30，trade_job_locks 互斥，3 次重试。
+- **备份**（`jobs/backup_database.py`）：SQLite online backup API（不锁源库）+ 30 天保留 + 完整性检查。
+- **健康检查**：`/api/health`（Web + DB）。
+- **部署模板**：docker-compose.yml（web + scheduler + nginx 注释）、deploy/nginx.conf（HTTPS + Basic Auth）、.env.example（TRADING_* 变量）、.gitignore（拦截证书/密码）。
+
+### 测试基线
+- 后端：`303 → 373 passed`（+70 个 Phase 5 测试，零回归）
+
+### Phase 5 简化项（后续可补）
+- 回测同步执行（无异步队列，个人用足够）。
+- 分组表现（按 regime/评分/行业/持仓周期）留接口。
+- 基准对比留接口（不做相对收益评价）。
+- 结构化日志 / Provider 指标未实现。
+- 周备份分级（12 周）未实现（仅 30 天日备份）。
+- 实际部署验证 / 恢复演练需服务器环境（spec §17 完成标准）。
+
+---
+
+## 全 5 阶段总结
+
+| Phase | 范围 | 测试 |
+|-------|------|------|
+| Phase 1 | 模块骨架 + Provider + 股票池 + 数据健康 + 前端 Tab | 26→112 |
+| Phase 2 | 账户/持仓/成交/净值/仓位计算/风险限制 | 112→190 |
+| Phase 3 | 市场状态/评分/入场退出/指标/策略版本/计划生成/幂等 | 190→299 |
+| Phase 4 | 前端 7 子页（总览/计划/股池/持仓/回测[P5]/健康/策略） | 299（前端无后端改动） |
+| Phase 5 | 回测引擎/复盘/激活门禁/Scheduler/Docker/健康检查/备份 | 299→373 |
+
+**最终：373 backend tests passed，npm run build 通过。** 设计文档第 1-22 章的核心系统全部实现。
