@@ -1008,3 +1008,154 @@ class TradingRepository:
             return cur.lastrowid
         finally:
             conn.close()
+
+    # ---- Phase 5: Backtest Run ----
+
+    def create_backtest_run(self, *, job_id: int, strategy_version_id: int,
+                            stock_pool_version_id: int, start_date: str,
+                            end_date: str, initial_equity: float,
+                            fee_params_json: dict, status: str) -> dict:
+        """创建回测运行(spec §10.2)。job_id UNIQUE 命中则返回已有。"""
+        conn = self._conn()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM trade_backtest_runs WHERE job_id = ?", (job_id,),
+            ).fetchone()
+            if existing:
+                return {"id": existing["id"], "reused": True}
+            cur = conn.execute(
+                "INSERT INTO trade_backtest_runs "
+                "(job_id, strategy_version_id, stock_pool_version_id, start_date, end_date, "
+                " initial_equity, fee_params_json, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, strategy_version_id, stock_pool_version_id, start_date, end_date,
+                 initial_equity, json.dumps(fee_params_json, ensure_ascii=False), status),
+            )
+            run_id = cur.lastrowid
+            conn.commit()
+            return {"id": run_id, "reused": False}
+        finally:
+            conn.close()
+
+    def update_backtest_run(self, run_id: int, *, status: str,
+                            metrics_json: dict | None = None,
+                            equity_curve_json: list | None = None,
+                            finished_at: str | None = None) -> None:
+        sets = ["status = ?"]
+        params: list = [status]
+        if metrics_json is not None:
+            sets.append("metrics_json = ?")
+            params.append(json.dumps(metrics_json, ensure_ascii=False))
+        if equity_curve_json is not None:
+            sets.append("equity_curve_json = ?")
+            params.append(json.dumps(equity_curve_json, ensure_ascii=False))
+        if finished_at is not None:
+            sets.append("finished_at = ?")
+            params.append(finished_at)
+        else:
+            sets.append("finished_at = datetime('now','localtime')")
+        params.append(run_id)
+        conn = self._conn()
+        try:
+            conn.execute(
+                f"UPDATE trade_backtest_runs SET {', '.join(sets)} WHERE id = ?", params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_backtest_run(self, run_id: int) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_backtest_runs WHERE id = ?", (run_id,),
+            ).fetchone()
+            return self._row_to_backtest_run(row) if row else None
+        finally:
+            conn.close()
+
+    def list_backtest_runs(self, strategy_version_id: int | None = None,
+                           status: str | None = None) -> list[dict]:
+        """列出回测运行(最新优先)。用于激活门禁查最近一次回测。"""
+        clauses = []
+        params: list = []
+        if strategy_version_id is not None:
+            clauses.append("strategy_version_id = ?")
+            params.append(strategy_version_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM trade_backtest_runs{where} ORDER BY id DESC", params,
+            ).fetchall()
+            return [self._row_to_backtest_run(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_backtest_run(row) -> dict:
+        d = dict(row)
+        try:
+            d["fee_params"] = json.loads(d.pop("fee_params_json") or "{}")
+        except (ValueError, TypeError):
+            d["fee_params"] = {}
+        try:
+            d["metrics"] = json.loads(d.pop("metrics_json") or "null")
+        except (ValueError, TypeError):
+            d["metrics"] = None
+        try:
+            d["equity_curve"] = json.loads(d.pop("equity_curve_json") or "null")
+        except (ValueError, TypeError):
+            d["equity_curve"] = None
+        return d
+
+    # ---- Phase 5: Backtest Trade ----
+
+    def create_backtest_trade(self, *, backtest_run_id: int, stock_code: str,
+                              signal_date: str, entry_date: str | None = None,
+                              entry_price: float | None = None,
+                              exit_date: str | None = None,
+                              exit_price: float | None = None,
+                              quantity: int | None = None,
+                              pnl: float | None = None,
+                              r_multiple: float | None = None,
+                              exit_reason: str | None = None,
+                              details: dict | None = None) -> int:
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO trade_backtest_trades "
+                "(backtest_run_id, stock_code, signal_date, entry_date, entry_price, "
+                " exit_date, exit_price, quantity, pnl, r_multiple, exit_reason, details_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (backtest_run_id, stock_code, signal_date, entry_date, entry_price,
+                 exit_date, exit_price, quantity, pnl, r_multiple, exit_reason,
+                 json.dumps(details or {}, ensure_ascii=False)),
+            )
+            trade_id = cur.lastrowid
+            conn.commit()
+            return trade_id
+        finally:
+            conn.close()
+
+    def list_backtest_trades(self, run_id: int) -> list[dict]:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trade_backtest_trades WHERE backtest_run_id = ? "
+                "ORDER BY id ASC",
+                (run_id,),
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["details"] = json.loads(d.pop("details_json") or "{}")
+                except (ValueError, TypeError):
+                    d["details"] = {}
+                result.append(d)
+            return result
+        finally:
+            conn.close()
