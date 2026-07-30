@@ -55,12 +55,13 @@ def setup():
     account = repo.create_account(
         name="main", initial_equity=100_000, cash_balance=100_000,
     )
-    # 策略:创建并激活(stub 门禁)
+    # 策略:创建并激活(Phase 5 真门禁需合格回测)
     strat_svc = StrategyService(repo)
     created = strat_svc.create_strategy(
         strategy_code="default", name="v1",
         params_json={"risk_per_trade": 0.005, "min_score": 70},
     )
+    _seed_passing_backtest(repo, created["id"])
     strat_svc.activate_strategy(created["id"])
     strategy = repo.get_strategy(created["id"])
 
@@ -121,6 +122,26 @@ def _add_benchmark(repo, end_date=SIGNAL_DATE, n=70, start=3000.0):
 
 def _add_pool_stock(repo, code, end_date=SIGNAL_DATE, n=65, start=10.0):
     repo.upsert_daily_bars(_gen_bars(code, end_date, n, start, slope=0.004))
+
+
+def _seed_passing_backtest(repo, version_id):
+    """注入一条合格回测,供 Phase 5 激活门禁通过。"""
+    created = repo.create_backtest_run(
+        job_id=9000 + version_id, strategy_version_id=version_id,
+        stock_pool_version_id=1, start_date="2026-01-01",
+        end_date="2026-06-30", initial_equity=100000,
+        fee_params_json={"commission_rate": 0.0003}, status="RUNNING",
+    )
+    repo.update_backtest_run(
+        created["id"], status="SUCCEEDED",
+        metrics_json={
+            "trade_count": 100, "expectancy": 0.5, "profit_factor": 1.5,
+            "max_drawdown": 0.1, "concentration": {
+                "max_stock_share": 0.3, "max_month_share": 0.3,
+                "concentrated_stock": False, "concentrated_month": False,
+            },
+        },
+    )
 
 
 # ===================================================================

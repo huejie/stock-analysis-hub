@@ -59,6 +59,26 @@ def _add_pool_stock(repo, code, end_date=SIGNAL_DATE, n=65, start=10.0):
     repo.upsert_daily_bars(_gen_bars(code, end_date, n, start, slope=0.004))
 
 
+def _seed_passing_backtest(repo, version_id):
+    """注入一条合格回测,供 Phase 5 激活门禁通过。"""
+    created = repo.create_backtest_run(
+        job_id=9000 + version_id, strategy_version_id=version_id,
+        stock_pool_version_id=1, start_date="2026-01-01",
+        end_date="2026-06-30", initial_equity=100000,
+        fee_params_json={"commission_rate": 0.0003}, status="RUNNING",
+    )
+    repo.update_backtest_run(
+        created["id"], status="SUCCEEDED",
+        metrics_json={
+            "trade_count": 100, "expectancy": 0.5, "profit_factor": 1.5,
+            "max_drawdown": 0.1, "concentration": {
+                "max_stock_share": 0.3, "max_month_share": 0.3,
+                "concentrated_stock": False, "concentrated_month": False,
+            },
+        },
+    )
+
+
 # ===================================================================
 # Fixtures
 # ===================================================================
@@ -102,12 +122,13 @@ def seeded_setup():
     account = repo.create_account(
         name="main", initial_equity=100_000, cash_balance=100_000,
     )
-    # 策略:创建并激活
+    # 策略:创建并激活(Phase 5 真门禁需合格回测)
     strat_svc = StrategyService(repo)
     created = strat_svc.create_strategy(
         strategy_code="default", name="v1",
         params_json={"risk_per_trade": 0.005, "min_score": 70},
     )
+    _seed_passing_backtest(repo, created["id"])
     strat_svc.activate_strategy(created["id"])
     # 股票池
     pool = repo.create_stock_pool_version(
@@ -172,6 +193,27 @@ async def test_list_strategies():
 
 @pytest.mark.asyncio
 async def test_activate_strategy():
+    """门禁通过(有合格回测)→ 200 ACTIVE,无 warning。"""
+    import backend.trading.router as router_mod
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        r_create = await ac.post("/api/trading/strategies", json={
+            "strategy_code": "default", "name": "v1",
+            "params_json": {"risk_per_trade": 0.005},
+        })
+        sid = r_create.json()["id"]
+        _seed_passing_backtest(router_mod.trading_repo, sid)
+        resp = await ac.post(f"/api/trading/strategies/{sid}/activate")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == sid
+    assert data["status"] == "ACTIVE"
+    assert isinstance(data["warnings"], list)
+    assert data["warnings"] == []  # 门禁通过,无 warning(Phase 5 真校验)
+
+
+@pytest.mark.asyncio
+async def test_activate_strategy_no_backtest_422():
+    """无回测数据 → 激活被拒(400)。spec §14.4。"""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r_create = await ac.post("/api/trading/strategies", json={
             "strategy_code": "default", "name": "v1",
@@ -179,29 +221,28 @@ async def test_activate_strategy():
         })
         sid = r_create.json()["id"]
         resp = await ac.post(f"/api/trading/strategies/{sid}/activate")
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["id"] == sid
-    assert data["status"] == "ACTIVE"
-    assert isinstance(data["warnings"], list)
-    assert len(data["warnings"]) >= 1  # stub 门禁 warning
+    assert resp.status_code == 400
+    assert "无回测数据" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
 async def test_activate_strategy_retires_previous():
-    """激活新版本时旧 ACTIVE 自动 RETIRED。"""
+    """激活新版本时旧 ACTIVE 自动 RETIRED(两条都有合格回测)。"""
+    import backend.trading.router as router_mod
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r1 = await ac.post("/api/trading/strategies", json={
             "strategy_code": "default", "name": "v1",
             "params_json": {"risk_per_trade": 0.005},
         })
         sid1 = r1.json()["id"]
+        _seed_passing_backtest(router_mod.trading_repo, sid1)
         await ac.post(f"/api/trading/strategies/{sid1}/activate")
         r2 = await ac.post("/api/trading/strategies", json={
             "strategy_code": "default", "name": "v2",
             "params_json": {"risk_per_trade": 0.006},  # 不同 params → 新 hash
         })
         sid2 = r2.json()["id"]
+        _seed_passing_backtest(router_mod.trading_repo, sid2)
         resp = await ac.post(f"/api/trading/strategies/{sid2}/activate")
     assert resp.status_code == 200
     assert resp.json()["retired_previous_id"] == sid1
