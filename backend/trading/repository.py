@@ -629,6 +629,29 @@ class TradingRepository:
         finally:
             conn.close()
 
+    def list_equity_snapshots(self, account_id: int, start: str | None = None,
+                              end: str | None = None) -> list[dict]:
+        """列出账户在 [start, end] 区间的净值快照(按 trade_date 升序)。"""
+        clauses = ["account_id = ?"]
+        params: list = [account_id]
+        if start:
+            clauses.append("trade_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("trade_date <= ?")
+            params.append(end)
+        where = " AND ".join(clauses)
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM trade_equity_snapshots WHERE {where} "
+                f"ORDER BY trade_date ASC",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
     # ---- Phase 3: Strategy Version ----
 
     @staticmethod
