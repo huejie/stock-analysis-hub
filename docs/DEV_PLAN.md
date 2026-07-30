@@ -853,3 +853,37 @@ if records:
 
 ### Phase 4 起点
 前端交易决策界面：trading Tab 扩展（账户/持仓/计划/策略设置面板），响应式 + 风险提示。Phase 3 的 API 已就绪。
+
+---
+
+## Trading Decision System Phase 4 完成（2026-07-24）
+
+基于 `docs/specs/2026-07-21-trading-decision-system-design.md` 第 17 章 Phase 4（Web 交易决策界面）已实现。
+
+### 已交付
+- **7 个二级子页**（TradingView 集成）：总览 / 次日计划 / 股票池 / 持仓与成交 / 回测与复盘[P5 占位] / 数据健康 / 策略设置。
+- **TradingDashboard**：净值/现金/市值/总仓位/回撤卡片 + 市场状态（regime 分数/降级）+ 最近计划摘要 + 数据健康摘要。胜率/R/期望值标注 Phase 5。
+- **DailyPlanPanel**：计划生成表单 + 列表 + 详情（持仓处理在前候选在后排序 + 14 列 + rule_hits chips）+ 发布（READY/PARTIAL 可发布，BLOCKED 禁用无绕过）。
+- **AccountPanel + PortfolioPanel**：账户 CRUD/选择 + 持仓表 + 成交录入（BUY/SELL + client_execution_id UUID 幂等 + 100 股校验）+ 净值快照。
+- **StrategySettingsPanel**：版本列表 + 参数表（默认/当前/范围/风险解释）+ 草稿创建 + 激活（stub 警告）+ 高风险参数二次确认弹窗。
+- **useFormat** composable：统一金额（¥）/百分比/价格/数量格式化（spec §12.7）。
+
+### 测试基线
+- 后端：299 passed（Phase 4 纯前端，后端无改动）
+- 前端：`npm run build` 通过（vue-tsc 0 错误）
+
+### 完成标准达成（spec §17 Phase 4）
+> "用户不使用命令行即可完成每日闭环。"
+
+✅ 浏览器内可完成：建账户 → 导入股池 → 查看数据健康 → 生成计划 → 审核/发布 → 录入成交 → 查看净值。无需 CLI。
+
+### 关键设计决策
+- XLSX 导入暂不支持（文本/CSV 足够，spec §12.4 要求留后）。
+- 前端测试用类型检查 + 构建（不引入 Vitest/Playwright，spec §15.5 留后）。
+- /dashboard 聚合端点不做（前端组合 equity-snapshots + plan-runs + data-health）。
+- 胜率/R/期望值/规则执行率标注 Phase 5（依赖 /reviews/summary）。
+- 回测与复盘子页占位（Phase 5）。
+- 高风险参数确认用内联 modal（ConfirmModal 是 OCR 专用，不通用）。
+
+### Phase 5 起点
+回测引擎、复盘统计、Scheduler 定时、Docker Compose、Nginx/HTTPS、备份恢复。

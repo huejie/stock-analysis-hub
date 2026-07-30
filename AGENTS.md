@@ -119,7 +119,14 @@ pytest -v  # 详细输出
   - `services/indicator_service.py` — MA/ATR/分位数/波动率纯 Python 实现（防未来函数：调用方只传到 t 的 K 线）。
   - `services/strategy_service.py` — 策略版本 CRUD + DRAFT→ACTIVE→RETIRED 状态机（激活门禁 stub，Phase 5 启用真校验）。
   - `services/plan_service.py` — 10 步生成流程（持仓优先→候选评分→入场→仓位→风控→固化）+ CREATED→VALIDATING→GENERATING→READY→PUBLISHED 状态机 + SHA256 幂等键（同输入复用，输入变化 SUPERSEDE 旧计划）。
-- 回测/复盘/Scheduler/前端计划面板在 Phase 4-5。
+- **Phase 4 范围（已交付）**：前端交易决策界面——7 个二级子页（总览/次日计划/股票池/持仓与成交/回测与复盘[P5 占位]/数据健康/策略设置）。
+  - `views/TradingView.vue` — 二级导航 + 账户选择跨面板共享。
+  - `components/trading/TradingDashboard.vue` — 总览（净值/现金/市值/仓位/回撤卡片 + 市场状态 + 最近计划 + 数据健康摘要；胜率/R/期望值标注 Phase 5）。
+  - `components/trading/DailyPlanPanel.vue` — 计划生成/列表/详情（持仓处理在前候选在后）/发布（BLOCKED 禁用）。
+  - `components/trading/AccountPanel.vue` + `PortfolioPanel.vue` — 账户 CRUD + 持仓/成交录入（client_execution_id UUID 幂等）+ 净值快照。
+  - `components/trading/StrategySettingsPanel.vue` — 策略版本/参数表（默认值/范围/风险解释）/草稿创建/激活（stub 警告）/高风险参数二次确认。
+  - `composables/useFormat.ts` — 统一金额/百分比/价格/数量格式化（spec §12.7）。
+- 回测/复盘/Scheduler 在 Phase 5。
 
 ## 龙虎榜股池追踪
 

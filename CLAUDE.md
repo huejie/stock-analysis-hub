@@ -109,7 +109,8 @@ pytest -v  # 详细输出
 - **Phase 1 范围**：骨架 + Provider + 股票池 + 数据健康 + 前端 Tab。
 - **Phase 2 范围（已交付）**：账户/持仓/成交 CRUD + T+1 + 净值快照（peak/drawdown）+ 仓位计算纯函数 + 账户级风险限制。`position_sizing.py`/`account_service.py`/`execution_service.py`/`portfolio_service.py`。
 - **Phase 3 范围（已交付）**：策略/计划引擎。`strategies/`(market_regime/scoring/entry_rules/exit_rules 纯函数)、`indicator_service`(MA/ATR 纯 Python 防未来函数)、`strategy_service`(版本+激活状态机)、`plan_service`(10 步生成+状态机+幂等键)。
-- 回测/复盘/Scheduler/前端计划面板在 Phase 4-5。
+- **Phase 4 范围（已交付）**：前端 7 个二级子页（TradingDashboard/DailyPlanPanel/StockPoolPanel/AccountPanel+PortfolioPanel/StrategySettingsPanel/DataHealthPanel，回测占位 P5）。`useFormat` 统一格式化。
+- 回测/复盘/Scheduler 在 Phase 5。
 
 ## 龙虎榜股池追踪
 
