@@ -33,6 +33,7 @@ frontend/tsconfig.tsbuildinfo
 # IDE / Claude
 .claude/
 docs/superpowers/
+.worktrees/
 
 # 部署敏感文件(spec §16:证书/密码/htpasswd 不得提交 Git)
 deploy/certs/
