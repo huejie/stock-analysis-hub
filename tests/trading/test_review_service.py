@@ -29,9 +29,12 @@ def setup():
     account = repo.create_account(name="main", initial_equity=100_000,
                                   cash_balance=100_000)
     # 构造一个 plan_run + 2 个 CONDITIONAL_BUY items(带 stop_price)
+    # 日期用相对今天(10 天前),确保在默认 30 天复盘窗口内
+    _sd = (date.today() - timedelta(days=10)).isoformat()
+    _td = (date.today() - timedelta(days=9)).isoformat()
     created = repo.create_plan_run(
-        run_key="rk1", account_id=account["id"], signal_date="2026-07-01",
-        target_trade_date="2026-07-02", stock_pool_version_id=1,
+        run_key="rk1", account_id=account["id"], signal_date=_sd,
+        target_trade_date=_td, stock_pool_version_id=1,
         strategy_version_id=1, status="PUBLISHED",
         account_snapshot_json={}, data_snapshot_hash="h",
     )

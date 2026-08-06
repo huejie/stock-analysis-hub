@@ -1,11 +1,12 @@
 """交易决策 API 路由（/api/trading/*）。
 
 通过 APIRouter 注册到 main.py，不直接修改 main.py 路由列表（文档第 6 章）。
-Phase 1 实现：股票池导入/查询、数据健康、数据任务。
-Phase 2 实现：账户、持仓、成交、净值快照（spec §12.5）。
+Phase 1: 股票池导入/查询、数据健康。
+Phase 2: 账户、持仓、成交、净值快照（spec §12.5）。
+Phase 3: 策略版本、计划生成。
+Phase 5: 回测、复盘。
 
-注意：Phase 1 的 data-jobs 只创建任务记录，不实际执行抓取（执行需要 scheduler，
-Phase 5）。前端可轮询状态，但任务会停留在 QUEUED。
+data-jobs 创建任务记录后,通过 run_in_executor 后台执行行情抓取,前端轮询状态。
 """
 import hashlib
 import json
@@ -14,6 +15,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, Query
 
 from ..config import settings
+from .providers.factory import get_provider
 from .repository import TradingRepository
 from .schemas import (
     DataHealthResponse,
@@ -67,7 +69,7 @@ router = APIRouter(prefix="/api/trading", tags=["trading"])
 # 模块级单例（测试通过 monkeypatch 替换）
 trading_repo = TradingRepository(settings.db_path)
 pool_service = PoolService(trading_repo)
-market_data_service = MarketDataService(trading_repo, provider=None)
+market_data_service = MarketDataService(trading_repo, provider=get_provider())
 account_service = AccountService(trading_repo)
 execution_service = ExecutionService(trading_repo)
 portfolio_service = PortfolioService(trading_repo)
@@ -143,18 +145,89 @@ async def data_health(trade_date: str = Query(default="")):
 
 # ---- 数据任务 ----
 
+# 幂等保护:同 job_key 正在运行时不重复启动(spec §13.1 互斥语义)
+_running_job_keys: set[str] = set()
+
+
+def _execute_data_job(job_id: int, job_key: str, req_data: dict) -> None:
+    """后台执行数据任务(在 run_in_executor 线程中调用)。
+
+    状态流转:RUNNING → SUCCEEDED(带 result) / FAILED(带 error)。
+    """
+    try:
+        trading_repo.update_job(job_id, status="RUNNING")
+        job_type = req_data.get("job_type", "")
+        trade_date_str = req_data.get("trade_date", "")
+        target = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
+
+        if job_type in ("update_bars", "validate_data"):
+            # 更新股票池全部 + 基准
+            pool_count = market_data_service.update_pool_bars("default", target)
+            benchmarks = [c.strip() for c in settings.trading_benchmark_codes.split(",") if c.strip()]
+            bench_count = market_data_service.update_benchmark(target, benchmarks)
+            result = {"pool_bars_updated": pool_count, "benchmark_bars_updated": bench_count}
+
+        elif job_type == "backfill_bars":
+            start_str = req_data.get("start_date")
+            end_str = req_data.get("end_date")
+            if not start_str or not end_str:
+                raise ValueError("backfill_bars 需要 start_date 和 end_date")
+            codes = req_data.get("stock_codes")
+            if not codes:
+                codes = trading_repo.get_latest_pool_codes("default")
+            # 分日回补
+            from datetime import timedelta
+            cur = date.fromisoformat(start_str)
+            end = date.fromisoformat(end_str)
+            total = 0
+            while cur <= end:
+                total += market_data_service.update_bars(codes, cur)
+                cur += timedelta(days=1)
+            result = {"bars_updated": total, "date_range": f"{start_str}~{end_str}"}
+
+        elif job_type == "refresh_calendar":
+            # Phase 5 简化:等价于 update_bars
+            pool_count = market_data_service.update_pool_bars("default", target)
+            result = {"bars_updated": pool_count}
+
+        else:
+            raise ValueError(f"未知 job_type: {job_type}")
+
+        trading_repo.update_job(job_id, status="SUCCEEDED", progress=1.0, result=result)
+    except Exception as e:
+        trading_repo.update_job(job_id, status="FAILED", error={"error": str(e)})
+    finally:
+        _running_job_keys.discard(job_key)
+
+
 @router.post("/data-jobs", status_code=202)
 async def create_data_job(req: DataJobCreateRequest):
+    import asyncio
     target = date.fromisoformat(req.trade_date) if req.trade_date else date.today()
     job_key = hashlib.sha256(
         f"{req.job_type}|{target.isoformat()}|{req.start_date}|{req.end_date}".encode()
     ).hexdigest()[:16]
+
+    # 幂等:同 key 正在运行 → 不重复启动
+    if job_key in _running_job_keys:
+        existing = trading_repo.get_job_by_key(job_key) if hasattr(trading_repo, "get_job_by_key") else None
+        if existing:
+            return {"job_id": existing["id"], "status": "RUNNING", "job_key": job_key, "reused": True}
+
     job_id = trading_repo.create_job(
         job_type=req.job_type,
         job_key=job_key,
         request={"trade_date": target.isoformat(),
                  "start_date": req.start_date, "end_date": req.end_date,
-                 "stock_codes": req.stock_codes},
+                 "stock_codes": req.stock_codes, "job_type": req.job_type},
+    )
+    # 后台执行(参考 main.py lhb pool 更新模式)
+    _running_job_keys.add(job_key)
+    req_data = {"job_type": req.job_type, "trade_date": target.isoformat(),
+                "start_date": req.start_date, "end_date": req.end_date,
+                "stock_codes": req.stock_codes}
+    asyncio.get_running_loop().run_in_executor(
+        None, _execute_data_job, job_id, job_key, req_data
     )
     return {"job_id": job_id, "status": "QUEUED", "job_key": job_key}
 

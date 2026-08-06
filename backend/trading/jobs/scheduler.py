@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 
 from ...config import settings
 from ..migrations import run_migrations
+from ..providers.factory import get_provider
 from ..repository import TradingRepository
 from ..services.market_data_service import MarketDataService
 from ..services.plan_service import PlanService
@@ -69,12 +70,12 @@ def run_task(repo: TradingRepository, task_name: str, trade_date: date) -> bool:
     logger.info("执行任务 %s (交易日=%s)", task_name, trade_date)
     try:
         if task_name == "update_market_data":
-            mds = MarketDataService(repo, provider=None)  # Phase 5 无 scheduler 接 provider
+            mds = MarketDataService(repo, provider=get_provider())
             mds.update_pool_bars("default", trade_date)
             benchmarks = [c.strip() for c in settings.trading_benchmark_codes.split(",") if c.strip()]
             mds.update_benchmark(trade_date, benchmarks)
         elif task_name == "generate_daily_plan":
-            mds = MarketDataService(repo, provider=None)
+            mds = MarketDataService(repo, provider=get_provider())
             ps = PortfolioService(repo)
             plan_svc = PlanService(repo, mds, ps)
             strat_svc = StrategyService(repo)
