@@ -40,3 +40,10 @@ deploy/certs/
 deploy/htpasswd
 *.pem
 *.key
+
+# Subagent 临时工作文件
+findings.md
+progress.md
+task_plan.md
+.zcode/
+deploy-artifacts/
