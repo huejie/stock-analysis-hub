@@ -56,19 +56,29 @@ def test_next_run_time_none_after_all():
     assert _next_run_time(now) is None
 
 
-def test_next_run_time_picks_plan():
-    """20:16 时,update 已过,下一个是 20:25 generate_daily_plan。"""
+def test_next_run_time_picks_reconcile():
+    """20:16 时,update 已过,下一个是 20:20 reconcile_orders。"""
     now = datetime(2026, 7, 22, 20, 16, 0)
+    nxt = _next_run_time(now)
+    assert nxt is not None
+    _, name = nxt
+    assert name == "reconcile_orders"
+
+
+def test_next_run_time_picks_plan():
+    """20:21 时,reconcile 已过,下一个是 20:25 generate_daily_plan。"""
+    now = datetime(2026, 7, 22, 20, 21, 0)
     nxt = _next_run_time(now)
     assert nxt is not None
     _, name = nxt
     assert name == "generate_daily_plan"
 
 
-def test_schedule_has_three_tasks():
-    assert len(SCHEDULE) == 3
+def test_schedule_has_four_tasks():
+    assert len(SCHEDULE) == 4
     names = [t[2] for t in SCHEDULE]
     assert "update_market_data" in names
+    assert "reconcile_orders" in names
     assert "generate_daily_plan" in names
     assert "backup_database" in names
 

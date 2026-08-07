@@ -436,6 +436,19 @@ class PlanService:
             entry_price=pos["average_cost"], atr=atr,
             highest_close=highest_close,
         )
+        # 移动止损回写(spec §8.8:只上移不下移,compute_trailing_stop 已保证单调)
+        if exit_result.new_trailing_stop is not None:
+            new_ts = exit_result.new_trailing_stop
+            old_ts = pos.get("trailing_stop")
+            if new_ts != old_ts:
+                self.repo.upsert_position(
+                    account_id=pos["account_id"], stock_code=code,
+                    quantity=pos["quantity"], available_quantity=pos["available_quantity"],
+                    average_cost=pos["average_cost"], stock_name=pos.get("stock_name"),
+                    initial_stop=pos.get("initial_stop"),
+                    trailing_stop=new_ts,
+                    opened_at=pos.get("opened_at"),
+                )
         action = exit_result.action  # EXIT / REDUCE / HOLD
         return {
             "stock_code": code, "stock_name": pos.get("stock_name"),
@@ -453,45 +466,72 @@ class PlanService:
                          drawdown_paused: bool = False) -> list[dict]:
         """对池内每只股票评分 → 入场 → 仓位 → 风控(spec §8.5/§8.6/§8.7)。
 
-        Phase 3 简化:pool_return_percentile / excess / volume_ratio 用近似值。
+        两遍扫描:第一遍算各股票 20 日收益/量比/跳空;第二遍按池内分位评分。
         回撤暂停(drawdown_paused)时所有候选降级为 FORBIDDEN(spec 场景 D)。
         """
         benchmark_closes = [b.close for b in benchmark_bars]
         bm_ret_20d = _ret_over(benchmark_closes, 20)
         bm_ret_60d = _ret_over(benchmark_closes, 60)
 
-        scored: list[dict] = []
+        # ---- 第一遍:加载 bars,计算原始指标(收益/量比/跳空) ----
+        raw: list[dict] = []
+        all_returns_20d: list[float] = []  # 用于池内分位排名
         for it in pool.get("items", []):
             code = it["stock_code"]
             bars = self._load_bars_up_to(code, signal_date_d, window=70)
             if len(bars) < 20:
-                # 数据不足(上市短或缺失)→ FORBIDDEN/DATA_UNAVAILABLE
-                scored.append({
+                raw.append({
                     "code": code, "name": it.get("stock_name"),
                     "ind": None, "breakdown": None, "score": -1,
                     "_misses": ["INSUFFICIENT_BARS"],
                 })
                 continue
             ind = compute_indicators(bars)
-            # 近似超额收益(正:股票近 N 日收益 > 基准)
             closes = [b.close for b in bars]
             stk_ret_20d = _ret_over(closes, 20)
             stk_ret_60d = _ret_over(closes, 60)
-            excess_20d = (stk_ret_20d - bm_ret_20d) if stk_ret_20d is not None else 0.0
-            excess_60d = (stk_ret_60d - bm_ret_60d) if stk_ret_60d is not None else 0.0
-            breakdown = compute_score(
-                ind,
-                pool_return_percentile=_DEFAULT_POOL_RETURN_PERCENTILE,
-                excess_20d=excess_20d if excess_20d > 0 else _DEFAULT_EXCESS_20D,
-                excess_60d=excess_60d if excess_60d > 0 else _DEFAULT_EXCESS_60D,
-                volume_ratio=_DEFAULT_VOLUME_RATIO,
-                has_gap=False, auxiliary_bonus=_DEFAULT_AUXILIARY_BONUS,
-            )
-            scored.append({
+            # 量比 = 当日成交量 / 近 5 日平均成交量(spec §8.5)
+            vols = [b.volume for b in bars]
+            vol_ratio = _volume_ratio(vols)
+            # 跳空检测:近 20 日是否有单日跳空 > 5%(spec §8.5 波动风险)
+            gap = _has_gap(bars[-20:])
+            raw.append({
                 "code": code, "name": it.get("stock_name"),
-                "ind": ind, "breakdown": breakdown, "score": breakdown.total,
+                "ind": ind, "stk_ret_20d": stk_ret_20d, "stk_ret_60d": stk_ret_60d,
+                "vol_ratio": vol_ratio, "has_gap": gap, "score": None,
                 "_misses": [],
             })
+            if stk_ret_20d is not None:
+                all_returns_20d.append(stk_ret_20d)
+
+        # ---- 第二遍:按池内分位排名 + 评分 ----
+        scored: list[dict] = []
+        for item in raw:
+            if item["ind"] is None:
+                scored.append(item)  # INSUFFICIENT_BARS,直接透传
+                continue
+            stk_ret_20d = item["stk_ret_20d"]
+            stk_ret_60d = item["stk_ret_60d"]
+            # 池内 20 日收益分位(0-1)
+            if stk_ret_20d is not None and all_returns_20d:
+                pool_pct = sum(1 for r in all_returns_20d if r < stk_ret_20d) / len(all_returns_20d)
+            else:
+                pool_pct = _DEFAULT_POOL_RETURN_PERCENTILE
+            # 超额收益
+            excess_20d = (stk_ret_20d - bm_ret_20d) if stk_ret_20d is not None and bm_ret_20d is not None else 0.0
+            excess_60d = (stk_ret_60d - bm_ret_60d) if stk_ret_60d is not None and bm_ret_60d is not None else 0.0
+            breakdown = compute_score(
+                item["ind"],
+                pool_return_percentile=pool_pct,
+                excess_20d=excess_20d,
+                excess_60d=excess_60d,
+                volume_ratio=item["vol_ratio"],
+                has_gap=item["has_gap"],
+                auxiliary_bonus=_DEFAULT_AUXILIARY_BONUS,
+            )
+            item["breakdown"] = breakdown
+            item["score"] = breakdown.total
+            scored.append(item)
 
         # 按评分降序(spec §9.1 step 6)
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -804,6 +844,31 @@ def _ret_over(closes: list[float], period: int) -> float | None:
     if base == 0:
         return None
     return (closes[-1] - base) / base
+
+
+def _volume_ratio(vols: list[float]) -> float:
+    """量比 = 当日成交量 / 近 5 日平均成交量(spec §8.5)。
+
+    数据不足时返回 1.0(中性)。
+    """
+    if len(vols) < 6:
+        return 1.0
+    avg_5d = sum(vols[-6:-1]) / 5
+    if avg_5d == 0:
+        return 1.0
+    return vols[-1] / avg_5d
+
+
+def _has_gap(bars: list) -> bool:
+    """近 N 根 K 线是否有异常跳空(单日开盘跳空 > 5%,spec §8.5 波动风险)。"""
+    if len(bars) < 2:
+        return False
+    for i in range(1, len(bars)):
+        prev_close = bars[i - 1].close
+        cur_open = bars[i].open
+        if prev_close > 0 and abs(cur_open - prev_close) / prev_close > 0.05:
+            return True
+    return False
 
 
 def _slim_health(health: dict) -> dict:

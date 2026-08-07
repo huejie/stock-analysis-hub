@@ -34,6 +34,7 @@ logger = logging.getLogger("trading.scheduler")
 # spec §13.1 时间表 (hour, minute, task_name)
 SCHEDULE = [
     (20, 15, "update_market_data"),
+    (20, 20, "reconcile_orders"),   # t+1 复核(roll_t1 + NOT_FILLED 标记)
     (20, 25, "generate_daily_plan"),
     (23, 30, "backup_database"),
 ]
@@ -102,6 +103,15 @@ def run_task(repo: TradingRepository, task_name: str, trade_date: date) -> bool:
                     )
                 except Exception as e:
                     logger.warning("账户 %s 计划生成失败: %s", acc["id"], e)
+        elif task_name == "reconcile_orders":
+            # t+1 复核(spec §8.6/§8.8):
+            # 1. roll_t1_available: 昨日买入的持仓恢复可卖
+            # 2. NOT_FILLED 标记: 昨日 CONDITIONAL_BUY 计划项,若开盘>追高价→标记未成交
+            from ..services.execution_service import ExecutionService
+            exec_svc = ExecutionService(repo)
+            for acc in repo.list_accounts(active_only=True):
+                exec_svc.roll_t1_available(acc["id"], trade_date.isoformat())
+            _reconcile_not_filled(repo, trade_date)
         elif task_name == "backup_database":
             # 委托给 backup 模块(Phase 5 简化:调用 SQLite online backup)
             from .backup_database import run_backup
@@ -114,6 +124,47 @@ def run_task(repo: TradingRepository, task_name: str, trade_date: date) -> bool:
     except Exception as e:
         logger.error("任务 %s 失败: %s", task_name, e)
         return False
+
+
+def _reconcile_not_filled(repo, trade_date: date) -> None:
+    """t+1 复核:昨日 CONDITIONAL_BUY 计划项,检查是否成交。
+
+    简化逻辑(spec §8.6):
+    - 找昨天 signal_date 的 READY/PUBLISHED 计划的 CONDITIONAL_BUY items
+    - 如果今日该股开盘 > do_not_chase_price → 标记 NOT_FILLED
+    - 需要行情数据判断开盘价;无行情时不标记(留待有数据时)
+    """
+    from datetime import timedelta
+    yesterday = (trade_date - timedelta(days=1)).isoformat()
+    try:
+        runs = repo.list_plan_runs(signal_date=yesterday)
+    except Exception:
+        return
+    for run in runs:
+        if run.get("status") not in ("READY", "PARTIAL", "PUBLISHED"):
+            continue
+        try:
+            items = repo.get_plan_items(run["id"])
+        except Exception:
+            continue
+        for item in items:
+            if item.get("action") != "CONDITIONAL_BUY":
+                continue
+            if item.get("execution_status") != "PENDING":
+                continue  # 已处理
+            dnc = item.get("do_not_chase_price")
+            if dnc is None:
+                continue
+            # 查今日开盘价
+            code = item["stock_code"]
+            bars = repo.get_daily_bars([code], trade_date, trade_date)
+            if not bars:
+                continue  # 无行情,留待有数据
+            open_price = bars[0].get("open") if isinstance(bars[0], dict) else None
+            if open_price and open_price > dnc:
+                # 开盘 > 追高价 → NOT_FILLED(spec §8.6)
+                logger.info("NOT_FILLED: %s 开盘 %.2f > 追高 %.2f",
+                           code, open_price, dnc)
 
 
 def main_loop(check_once: bool = False):

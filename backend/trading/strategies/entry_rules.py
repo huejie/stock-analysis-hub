@@ -45,9 +45,38 @@ def compute_trigger_prices(*, breakout_level: float, signal_day_high: float,
 
 def evaluate_entry(*, regime: str, score: ScoreBreakdown, ind: IndicatorResult,
                    entry_price: float, atr: float, low_10d: float,
-                   portfolio_has_capacity: bool, min_score: int = 70) -> EntryResult:
-    """评估入场条件(spec §8.6 6 条件)。"""
+                   portfolio_has_capacity: bool, min_score: int = 70,
+                   instrument_status=None) -> EntryResult:
+    """评估入场条件(spec §8.3 硬过滤 + §8.6 6 条件)。
+
+    instrument_status: InstrumentStatus 域对象(可选)。None 时跳过硬过滤
+    (Provider 暂为 stub,Phase 5 后续接入真实数据)。
+    """
     hits, misses = list(score.rule_hits), []
+
+    # ---- spec §8.3 硬过滤(禁止交易)----
+    if instrument_status is not None:
+        if instrument_status.is_st or instrument_status.is_delisting:
+            misses.append("ST_OR_DELISTING")
+            return EntryResult("FORBIDDEN", None, None, None, None, hits, misses,
+                              "ST/退市标的,禁止交易")
+        if instrument_status.is_suspended:
+            misses.append("SUSPENDED")
+            return EntryResult("FORBIDDEN", None, None, None, None, hits, misses,
+                              "停牌标的,禁止交易")
+        # 一字涨跌停(开盘=最高=最低=收盘,且触限价)
+        if (instrument_status.limit_up_price is not None
+                and ind.close >= instrument_status.limit_up_price
+                and ind.high == ind.low):
+            misses.append("LIMIT_UP_ONE_PRICE")
+            return EntryResult("FORBIDDEN", None, None, None, None, hits, misses,
+                              "一字涨停,无法成交")
+        if (instrument_status.limit_down_price is not None
+                and ind.close <= instrument_status.limit_down_price
+                and ind.high == ind.low):
+            misses.append("LIMIT_DOWN_ONE_PRICE")
+            return EntryResult("FORBIDDEN", None, None, None, None, hits, misses,
+                              "一字跌停,无法成交")
 
     # 条件 1: 市场非 DEFENSE
     if regime == "DEFENSE":
