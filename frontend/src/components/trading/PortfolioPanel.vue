@@ -138,18 +138,113 @@ async function computeEquity() {
   }
 }
 
+// ---- 对账校正(spec §12.5: 系统不擅自覆盖,差异须人工确认) ----
+interface BrokerForm {
+  stock_code: string
+  broker_quantity: number
+  broker_available: number
+  broker_avg_cost: number
+}
+interface FieldDiff {
+  field: string
+  system: number | null
+  broker: number
+}
+interface DiffResult {
+  status: 'match' | 'mismatch' | 'no_position'
+  systemPosition: Position | null
+  diffs: FieldDiff[]
+}
+
+const brokerForm = ref<BrokerForm>({
+  stock_code: '',
+  broker_quantity: 0,
+  broker_available: 0,
+  broker_avg_cost: 0,
+})
+const diffResult = ref<DiffResult | null>(null)
+const reconciling = ref(false)
+const correcting = ref(false)
+
+function numEq(a: number | null | undefined, b: number, eps = 0.0001): boolean {
+  if (a == null) return false
+  return Math.abs(a - b) < eps
+}
+
+function compareBroker() {
+  const code = brokerForm.value.stock_code.trim()
+  if (!code) {
+    error.value = '请输入股票代码'
+    diffResult.value = null
+    return
+  }
+  if (props.accountId == null) {
+    error.value = '请先选择账户'
+    diffResult.value = null
+    return
+  }
+  error.value = ''
+  const sys = positions.value.find((p) => p.stock_code === code) || null
+  if (!sys) {
+    diffResult.value = { status: 'no_position', systemPosition: null, diffs: [] }
+    return
+  }
+  const diffs: FieldDiff[] = []
+  if (!numEq(sys.quantity, brokerForm.value.broker_quantity)) {
+    diffs.push({ field: '持仓量', system: sys.quantity, broker: brokerForm.value.broker_quantity })
+  }
+  if (!numEq(sys.available_quantity, brokerForm.value.broker_available)) {
+    diffs.push({ field: '可用量', system: sys.available_quantity, broker: brokerForm.value.broker_available })
+  }
+  if (!numEq(sys.average_cost, brokerForm.value.broker_avg_cost, 0.001)) {
+    diffs.push({ field: '成本价', system: sys.average_cost, broker: brokerForm.value.broker_avg_cost })
+  }
+  diffResult.value = {
+    status: diffs.length ? 'mismatch' : 'match',
+    systemPosition: sys,
+    diffs,
+  }
+}
+
+async function confirmCorrection() {
+  if (props.accountId == null || !diffResult.value) return
+  correcting.value = true
+  error.value = ''
+  success.value = ''
+  try {
+    await api.manualCorrectPosition(brokerForm.value.stock_code.trim(), {
+      account_id: props.accountId,
+      quantity: brokerForm.value.broker_quantity,
+      available_quantity: brokerForm.value.broker_available,
+      average_cost: brokerForm.value.broker_avg_cost,
+      note: '对账校正: 券商实际持仓覆盖',
+    })
+    success.value = `已校正 ${brokerForm.value.stock_code} 持仓为券商实际值(审计日志已记录)`
+    diffResult.value = null
+    brokerForm.value = { stock_code: '', broker_quantity: 0, broker_available: 0, broker_avg_cost: 0 }
+    await loadPositions()
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    correcting.value = false
+  }
+}
+
 // accountId 变化时重新加载
 watch(
   () => props.accountId,
   (id) => {
     if (id != null) {
       resetForm()
+      diffResult.value = null
+      brokerForm.value = { stock_code: '', broker_quantity: 0, broker_available: 0, broker_avg_cost: 0 }
       void loadAll()
       equity.value = null
     } else {
       positions.value = []
       executions.value = []
       equity.value = null
+      diffResult.value = null
     }
   },
   { immediate: true },
@@ -199,6 +294,65 @@ watch(
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- 对账校正(spec §12.5) -->
+      <section class="section">
+        <h4>对账校正</h4>
+        <p class="hint">录入券商实际持仓,与系统持仓比对;差异需人工确认后才会覆盖。</p>
+        <div class="exec-form">
+          <div class="form-field">
+            <label>股票代码</label>
+            <input v-model="brokerForm.stock_code" type="text" placeholder="如 000001" class="mono" />
+          </div>
+          <div class="form-field">
+            <label>券商持仓量</label>
+            <input v-model.number="brokerForm.broker_quantity" type="number" min="0" step="100" />
+          </div>
+          <div class="form-field">
+            <label>券商可用量</label>
+            <input v-model.number="brokerForm.broker_available" type="number" min="0" step="100" />
+          </div>
+          <div class="form-field">
+            <label>券商成本价</label>
+            <input v-model.number="brokerForm.broker_avg_cost" type="number" min="0" step="0.001" />
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn-secondary" :disabled="reconciling" @click="compareBroker">对比</button>
+          <button
+            v-if="diffResult && diffResult.status !== 'match'"
+            class="btn-primary"
+            :disabled="correcting"
+            @click="confirmCorrection"
+          >
+            {{ correcting ? '校正中...' : '确认校正' }}
+          </button>
+        </div>
+
+        <!-- 对比结果 -->
+        <div v-if="diffResult" class="diff-result" :class="`diff-${diffResult.status}`">
+          <template v-if="diffResult.status === 'match'">
+            <span class="result-icon">✓</span>
+            <span>一致:系统持仓与券商数据完全相符。</span>
+          </template>
+          <template v-else-if="diffResult.status === 'no_position'">
+            <span class="result-icon">✗</span>
+            <span>系统无此持仓:券商有 {{ brokerForm.stock_code }} 持仓,但系统中不存在。</span>
+          </template>
+          <template v-else>
+            <span class="result-icon">!</span>
+            <span>差异 {{ diffResult.diffs.length }} 项:</span>
+            <ul class="diff-list">
+              <li v-for="d in diffResult.diffs" :key="d.field">
+                {{ d.field }}: 系统
+                <span class="mono">{{ d.system != null ? formatPrice(d.system) : '-' }}</span>
+                → 券商
+                <span class="mono">{{ formatPrice(d.broker) }}</span>
+              </li>
+            </ul>
+          </template>
         </div>
       </section>
 
@@ -372,7 +526,7 @@ th { color: #888; font-weight: 500; font-size: 0.85rem; }
 }
 .form-field select.side-buy { background: #14532d; color: #86efac; border-color: #10b981; }
 .form-field select.side-sell { background: #451a1a; color: #fca5a5; border-color: #ef4444; }
-.form-actions { margin-top: 0.75rem; }
+.form-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
 .btn-primary { padding: 0.45rem 1.2rem; color: white; border: none; border-radius: 4px; cursor: pointer; background: #3b82f6; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -387,6 +541,15 @@ th { color: #888; font-weight: 500; font-size: 0.85rem; }
 .metric-value { color: #eee; font-weight: 500; }
 .metric-value.total { color: #3b82f6; font-size: 1.05rem; }
 .drawdown-warn { color: #f59e0b; }
+
+/* 对账校正 */
+.diff-result { margin-top: 0.75rem; padding: 0.6rem 0.75rem; border-radius: 4px; border: 1px solid; font-size: 0.9rem; }
+.diff-result .result-icon { display: inline-block; width: 1.2rem; font-weight: 600; }
+.diff-match { background: #14532d; color: #86efac; border-color: #10b981; }
+.diff-mismatch { background: #3f2a05; color: #fbbf24; border-color: #f59e0b; }
+.diff-no_position { background: #451a1a; color: #fca5a5; border-color: #ef4444; }
+.diff-list { margin: 0.4rem 0 0 1.4rem; padding: 0; }
+.diff-list li { margin-top: 0.2rem; }
 
 @media (max-width: 600px) {
   .exec-form { grid-template-columns: 1fr 1fr; }

@@ -18,6 +18,8 @@ import type {
   PlanRunResponse,
   PlanRunDetail,
   PlanPublishResponse,
+  AuditLog,
+  StockBar,
 } from '../types/trading'
 
 export function useTradingApi() {
@@ -105,5 +107,24 @@ export function useTradingApi() {
       request<PlanRunDetail>(`/api/trading/plan-runs/${id}`),
     publishPlanRun: (id: number) =>
       request<PlanPublishResponse>(`/api/trading/plan-runs/${id}/publish`, { method: 'POST' }),
+
+    // 审计日志 / K线(spec §11.1/§12.3)
+    getAuditLogs: (params?: { entity_type?: string; entity_id?: string; action?: string; limit?: number }) => {
+      const qs = new URLSearchParams()
+      if (params?.entity_type) qs.set('entity_type', params.entity_type)
+      if (params?.entity_id) qs.set('entity_id', params.entity_id)
+      if (params?.action) qs.set('action', params.action)
+      if (params?.limit) qs.set('limit', String(params.limit))
+      const s = qs.toString()
+      return request<{ logs: AuditLog[] }>(`/api/trading/audit-logs${s ? '?' + s : ''}`)
+    },
+    getStockBars: (code: string, start?: string, end?: string, limit?: number) => {
+      const qs = new URLSearchParams()
+      if (start) qs.set('start', start)
+      if (end) qs.set('end', end)
+      if (limit) qs.set('limit', String(limit))
+      const s = qs.toString()
+      return request<{ code: string; bars: StockBar[]; indicators: Record<string, number | null> }>(`/api/trading/stocks/${code}/bars${s ? '?' + s : ''}`)
+    },
   }
 }

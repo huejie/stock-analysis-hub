@@ -251,3 +251,27 @@ export interface PlanPublishResponse {
   status: string
   published_at: string
 }
+
+// ---- 审计日志 / K线(spec §11.1/§12.3) ----
+export interface AuditLog {
+  id: number
+  actor: string
+  action: string
+  entity_type: string
+  entity_id: string | null
+  before_json: Record<string, unknown> | null
+  after_json: Record<string, unknown> | null
+  request_id: string | null
+  created_at: string
+}
+
+export interface StockBar {
+  stock_code: string
+  trade_date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  amount: number | null
+}

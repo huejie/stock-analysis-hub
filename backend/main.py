@@ -1,6 +1,9 @@
 import json
+import logging as _logging
 import os
 import shutil
+import time as _time
+import uuid as _uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +21,37 @@ from backend.ocr import analyze_image
 from backend.trading.router import router as trading_router
 
 app = FastAPI(title="Stock Analysis Hub")
+
+_logging.basicConfig(level=_logging.INFO, format='%(message)s')
+_logger = _logging.getLogger("stockpulse")
+
+
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    """结构化日志中间件(spec §11.1):每个请求分配 request_id,记录耗时与状态。"""
+    request_id = request.headers.get("X-Request-ID", str(_uuid.uuid4())[:12])
+    request.state.request_id = request_id
+    start = _time.time()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # 异常路径也要记录,便于排查;异常继续向上抛出
+        duration_ms = int((_time.time() - start) * 1000)
+        _logger.info(json.dumps({
+            "request_id": request_id, "method": request.method,
+            "path": request.url.path, "status": 500,
+            "duration_ms": duration_ms, "error": "unhandled",
+        }))
+        raise
+    duration_ms = int((_time.time() - start) * 1000)
+    response.headers["X-Request-ID"] = request_id
+    _logger.info(json.dumps({
+        "request_id": request_id, "method": request.method,
+        "path": request.url.path, "status": response.status_code,
+        "duration_ms": duration_ms,
+    }))
+    return response
+
 
 db = Database()
 
