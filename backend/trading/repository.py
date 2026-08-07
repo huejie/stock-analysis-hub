@@ -1032,6 +1032,45 @@ class TradingRepository:
         finally:
             conn.close()
 
+    def list_audit_logs(self, *, entity_type: str | None = None,
+                        entity_id: str | None = None,
+                        action: str | None = None,
+                        limit: int = 50) -> list[dict]:
+        """查询审计日志(spec §11.1:所有写操作可追溯)。"""
+        clauses = []
+        params: list = []
+        if entity_type:
+            clauses.append("entity_type = ?")
+            params.append(entity_type)
+        if entity_id:
+            clauses.append("action = ?")
+            params.append(action)
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM trade_audit_logs{where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                for key in ("before_json", "after_json"):
+                    val = d.get(key)
+                    if val:
+                        try:
+                            d[key] = json.loads(val)
+                        except (ValueError, TypeError):
+                            pass
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
     # ---- Phase 5: Backtest Run ----
 
     def create_backtest_run(self, *, job_id: int, strategy_version_id: int,

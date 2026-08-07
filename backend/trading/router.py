@@ -10,7 +10,7 @@ data-jobs 创建任务记录后,通过 run_in_executor 后台执行行情抓取,
 """
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -358,6 +358,60 @@ async def get_equity_snapshot(account_id: int, trade_date: str = Query(...)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return EquitySnapshotResponse(**snap).model_dump()
+
+
+# ---- 审计日志 + K线读取(spec §11.1/§12.3) ----
+
+@router.get("/audit-logs")
+async def list_audit_logs(
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+    limit: int = Query(default=50, le=200),
+):
+    """查询审计日志(spec §11.1:所有写操作可追溯)。"""
+    logs = trading_repo.list_audit_logs(
+        entity_type=entity_type, entity_id=entity_id, action=action, limit=limit,
+    )
+    return {"logs": logs}
+
+
+@router.get("/stocks/{code}/bars")
+async def get_stock_bars(
+    code: str,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    limit: int = Query(default=60, le=250),
+):
+    """读取个股 K 线(spec §12.3:计划详情抽屉展示 K 线)。
+
+    返回 trade_daily_bars 中的原始 OHLCV 数据 + 基础指标(MA/ATR)。
+    """
+    if not start:
+        start = (date.today() - timedelta(days=120)).isoformat()
+    if not end:
+        end = date.today().isoformat()
+    bars = trading_repo.get_daily_bars([code], date.fromisoformat(start), date.fromisoformat(end))
+    # 截取最近 limit 根
+    bars = bars[-limit:] if len(bars) > limit else bars
+    # 计算基础指标(如果有足够数据)
+    indicators = {}
+    if bars:
+        from .domain import DailyBar as _DB
+        from .services.indicator_service import compute_indicators
+        domain_bars = [_DB(code=r["stock_code"], trade_date=date.fromisoformat(r["trade_date"]),
+                           open=r["open"], high=r["high"], low=r["low"], close=r["close"],
+                           volume=r["volume"], amount=r.get("amount"),
+                           source=r.get("source", "")) for r in bars]
+        try:
+            ind = compute_indicators(domain_bars)
+            indicators = {
+                "ma20": ind.ma20, "ma60": ind.ma60, "atr14": ind.atr,
+                "high_20d": ind.high_20d, "low_10d": ind.low_10d,
+            }
+        except Exception:
+            pass
+    return {"code": code, "bars": bars, "indicators": indicators}
 
 
 # ---- Phase 3: 策略 ----
