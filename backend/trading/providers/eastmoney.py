@@ -54,8 +54,9 @@ class EastmoneyProvider:
         return resp.json()
 
     def _secid(self, code: str) -> str:
-        """600000.SH -> '1.600000'(东方财富/腾讯 secid 形式)。"""
-        return f"{market_prefix(code)}.{bare_code(code)}"
+        """600000.SH -> 'sh600000'(腾讯 fqkline secid 形式)。"""
+        suffix = code.split(".")[-1].lower()
+        return f"{suffix}{bare_code(code)}"
 
     # ---- K 线解析 ----
 
@@ -100,10 +101,10 @@ class EastmoneyProvider:
                 logger.warning("eastmoney 日线获取失败 %s: %s", code, e)
                 raise ProviderError(self.name, f"日线获取失败 {code}: {e}", retriable=True) from e
 
-            # 腾讯结构:data -> {bare_code: {qfqday: [[...], ...]}} 或 {day: [[...]]}
+            # 腾讯结构:data -> {secid: {qfqday: [[...], ...]}} 或 {day: [[...]]}
             data_node = payload.get("data") or {}
-            bare = bare_code(code)
-            code_node = data_node.get(bare) or {}
+            secid = self._secid(code)
+            code_node = data_node.get(secid) or {}
             klines = code_node.get("qfqday") or code_node.get("day") or []
 
             for line in klines:

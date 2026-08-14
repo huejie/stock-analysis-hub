@@ -2,6 +2,8 @@ services:
   web:
     build: .
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8888 --workers 1
+    ports:
+      - "8888:8888"
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads

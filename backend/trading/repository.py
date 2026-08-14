@@ -293,9 +293,10 @@ class TradingRepository:
     # ---- 任务(Phase 1 仅最小实现,供数据更新使用) ----
 
     def create_job(self, job_type: str, job_key: str, request: dict) -> int:
+        from datetime import datetime as _dt
         conn = self._conn()
         try:
-            # 幂等:同 job_key 已存在且未完成则复用
+            # 幂等:同 job_key 未完成 → 复用;已完成 → 带时间戳重跑(股池变化后需重新更新行情)
             existing = conn.execute(
                 "SELECT id, status FROM trade_jobs WHERE job_key = ? "
                 "ORDER BY id DESC LIMIT 1",
@@ -303,6 +304,8 @@ class TradingRepository:
             ).fetchone()
             if existing and existing["status"] in ("QUEUED", "RUNNING"):
                 return existing["id"]
+            if existing:
+                job_key = f"{job_key}:{_dt.now().strftime('%H%M%S%f')}"
             cur = conn.execute(
                 "INSERT INTO trade_jobs (job_type, job_key, status, request_json) "
                 "VALUES (?, ?, 'QUEUED', ?)",
