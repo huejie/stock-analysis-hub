@@ -41,13 +41,13 @@ def test_is_trade_day_weekend():
 
 
 def test_next_run_time_finds_next():
-    """15:00 时,下一个任务是 20:15 update_market_data。"""
+    """15:00 时,下一个任务是 20:10 sync_pool_from_hotlist。"""
     now = datetime(2026, 7, 22, 15, 0, 0)
     nxt = _next_run_time(now)
     assert nxt is not None
     run_at, name = nxt
-    assert name == "update_market_data"
-    assert run_at.hour == 20 and run_at.minute == 15
+    assert name == "sync_pool_from_hotlist"
+    assert run_at.hour == 20 and run_at.minute == 10
 
 
 def test_next_run_time_none_after_all():
@@ -74,9 +74,10 @@ def test_next_run_time_picks_plan():
     assert name == "generate_daily_plan"
 
 
-def test_schedule_has_four_tasks():
-    assert len(SCHEDULE) == 4
+def test_schedule_has_five_tasks():
+    assert len(SCHEDULE) == 5
     names = [t[2] for t in SCHEDULE]
+    assert "sync_pool_from_hotlist" in names
     assert "update_market_data" in names
     assert "reconcile_orders" in names
     assert "generate_daily_plan" in names

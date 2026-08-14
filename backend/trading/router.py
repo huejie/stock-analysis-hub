@@ -96,6 +96,17 @@ async def import_stock_pool(req: StockPoolImportRequest):
     return result
 
 
+@router.post("/stock-pools/sync-from-hotlist")
+async def sync_pool_from_hotlist(pool_name: str = Query(default="default"),
+                                 top_n: int = Query(default=10, ge=1, le=50)):
+    """从最新热榜 Top N 同步股票池(手动触发,scheduler 20:10 自动执行)。"""
+    try:
+        result = pool_service.sync_from_hotlist(pool_name=pool_name, top_n=top_n)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
 @router.get("/stock-pools")
 async def list_stock_pools(pool_name: str = Query(default="default")):
     versions = pool_service.list_versions(pool_name)

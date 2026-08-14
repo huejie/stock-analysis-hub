@@ -31,3 +31,26 @@ class PoolService:
 
     def get_latest_codes(self, pool_name: str = "default") -> list[str]:
         return self.repo.get_latest_pool_codes(pool_name)
+
+    def sync_from_hotlist(self, pool_name: str = "default", top_n: int = 10) -> dict:
+        """从最新热榜 Top N 同步股票池(只读 stock_records)。
+
+        代码用 normalize 转换(000636 → 000636.SZ),ST/北交所过滤。
+        相同成分幂等(同 items_hash 返回 reused)。
+        """
+        from ..domain import normalize_stock_code
+        top = self.repo.get_latest_hotlist_top(limit=top_n)
+        if not top:
+            raise ValueError("热榜无数据,请先运行热榜爬虫(crawl.py)")
+        items = []
+        for t in top:
+            try:
+                code = normalize_stock_code(t["stock_code"])
+            except ValueError:
+                continue
+            items.append({"stock_code": code, "stock_name": t["stock_name"]})
+        if not items:
+            raise ValueError("热榜过滤后无有效沪深股票")
+        return self.repo.create_stock_pool_version(
+            pool_name, items, source="hotlist",
+        )

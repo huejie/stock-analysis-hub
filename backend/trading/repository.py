@@ -1221,3 +1221,79 @@ class TradingRepository:
             return result
         finally:
             conn.close()
+
+    # ---- 热榜只读复用(spec §2.1: 现有热榜数据只读,不改语义) ----
+
+    def get_hotlist_presence(self, codes: list[str], days: int = 5) -> dict[str, dict]:
+        """查询股票近 N 日热榜在榜情况(只读 stock_records)。
+
+        返回 {bare_code: {"on_list_days": int, "latest_rank": int,
+                          "rank_improved": bool, "heat_value": float|None}}。
+        rank_improved: 最新排名比首次上榜排名上升(数字变小)。
+        """
+        if not codes:
+            return {}
+        bares = [c.split(".")[0] for c in codes]
+        placeholders = ",".join("?" * len(bares))
+        from datetime import date as _date, timedelta as _td
+        start = (_date.today() - _td(days=days)).isoformat()
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                f"SELECT date, stock_code, rank, heat_value FROM stock_records "
+                f"WHERE stock_code IN ({placeholders}) AND date >= ? "
+                f"ORDER BY date DESC",
+                (*bares, start),
+            ).fetchall()
+        finally:
+            conn.close()
+        by_code: dict[str, list] = {}
+        for r in rows:
+            by_code.setdefault(r["stock_code"], []).append(r)
+        result: dict[str, dict] = {}
+        for bare, rs in by_code.items():
+            rs_sorted = sorted(rs, key=lambda x: x["date"])
+            first_rank = rs_sorted[0]["rank"]
+            latest = rs_sorted[-1]
+            result[bare] = {
+                "on_list_days": len(rs),
+                "latest_rank": latest["rank"],
+                "rank_improved": latest["rank"] < first_rank,
+                "heat_value": latest["heat_value"],
+            }
+        return result
+
+    def get_latest_hotlist_top(self, limit: int = 10) -> list[dict]:
+        """最新交易日的热榜 Top N(只读,用于股池同步)。
+
+        返回 [{stock_code(裸6位), stock_name, rank}]。过滤 ST/非沪深主板代码。
+        """
+        conn = self._conn()
+        try:
+            latest = conn.execute(
+                "SELECT MAX(date) AS d FROM stock_records"
+            ).fetchone()
+            if not latest or not latest["d"]:
+                return []
+            rows = conn.execute(
+                "SELECT stock_code, stock_name, rank FROM stock_records "
+                "WHERE date = ? ORDER BY rank ASC LIMIT ?",
+                (latest["d"], limit * 2),  # 多取,过滤后再截断
+            ).fetchall()
+        finally:
+            conn.close()
+        result = []
+        for r in rows:
+            code, name = r["stock_code"], r["stock_name"] or ""
+            # 过滤 ST/退市
+            if "ST" in name.upper() or "退" in name:
+                continue
+            # 只留沪深常规代码(0/3 开头深市,6 开头沪市;排除北交所 8/4 开头)
+            if not (code.startswith(("0", "3", "6")) and len(code) == 6 and code.isdigit()):
+                continue
+            result.append({
+                "stock_code": code, "stock_name": name, "rank": r["rank"],
+            })
+            if len(result) >= limit:
+                break
+        return result

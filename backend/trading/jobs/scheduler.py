@@ -32,7 +32,9 @@ from ..services.strategy_service import StrategyService
 logger = logging.getLogger("trading.scheduler")
 
 # spec §13.1 时间表 (hour, minute, task_name)
+# 20:00 热榜更新(现有外部 cron) → 20:10 热榜同步股池 → 20:15 行情 → 20:20 复核 → 20:25 计划
 SCHEDULE = [
+    (20, 10, "sync_pool_from_hotlist"),
     (20, 15, "update_market_data"),
     (20, 20, "reconcile_orders"),   # t+1 复核(roll_t1 + NOT_FILLED 标记)
     (20, 25, "generate_daily_plan"),
@@ -70,7 +72,15 @@ def run_task(repo: TradingRepository, task_name: str, trade_date: date) -> bool:
     """执行单个任务。返回成功与否。"""
     logger.info("执行任务 %s (交易日=%s)", task_name, trade_date)
     try:
-        if task_name == "update_market_data":
+        if task_name == "sync_pool_from_hotlist":
+            # 热榜 Top N → 股票池(挂在 20:00 热榜爬取之后)
+            from ..services.pool_service import PoolService
+            pool_svc = PoolService(repo)
+            result = pool_svc.sync_from_hotlist("default", top_n=10)
+            logger.info("热榜同步股池: v%s, %s 只, reused=%s",
+                        result.get("version_no"), result.get("items_count"),
+                        result.get("reused"))
+        elif task_name == "update_market_data":
             mds = MarketDataService(repo, provider=get_provider())
             mds.update_pool_bars("default", trade_date)
             benchmarks = [c.strip() for c in settings.trading_benchmark_codes.split(",") if c.strip()]

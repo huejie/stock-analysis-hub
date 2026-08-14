@@ -473,6 +473,13 @@ class PlanService:
         bm_ret_20d = _ret_over(benchmark_closes, 20)
         bm_ret_60d = _ret_over(benchmark_closes, 60)
 
+        # 热榜在榜情况(只读 stock_records,spec §8.5 辅助信号)
+        pool_codes = [it["stock_code"] for it in pool.get("items", [])]
+        try:
+            hotlist_info = self.repo.get_hotlist_presence(pool_codes, days=5)
+        except Exception:
+            hotlist_info = {}  # 热榜表缺失(独立 trading DB)时跳过
+
         # ---- 第一遍:加载 bars,计算原始指标(收益/量比/跳空) ----
         raw: list[dict] = []
         all_returns_20d: list[float] = []  # 用于池内分位排名
@@ -520,6 +527,8 @@ class PlanService:
             # 超额收益
             excess_20d = (stk_ret_20d - bm_ret_20d) if stk_ret_20d is not None and bm_ret_20d is not None else 0.0
             excess_60d = (stk_ret_60d - bm_ret_60d) if stk_ret_60d is not None and bm_ret_60d is not None else 0.0
+            # 热榜辅助加分(spec §8.5:当日/近期热榜趋势增强,合计上限 10)
+            aux = _hotlist_bonus(hotlist_info.get(item["code"].split(".")[0]))
             breakdown = compute_score(
                 item["ind"],
                 pool_return_percentile=pool_pct,
@@ -527,7 +536,7 @@ class PlanService:
                 excess_60d=excess_60d,
                 volume_ratio=item["vol_ratio"],
                 has_gap=item["has_gap"],
-                auxiliary_bonus=_DEFAULT_AUXILIARY_BONUS,
+                auxiliary_bonus=aux,
             )
             item["breakdown"] = breakdown
             item["score"] = breakdown.total
@@ -869,6 +878,30 @@ def _has_gap(bars: list) -> bool:
         if prev_close > 0 and abs(cur_open - prev_close) / prev_close > 0.05:
             return True
     return False
+
+
+def _hotlist_bonus(info: dict | None) -> int:
+    """热榜辅助加分(spec §8.5:当日/近期热榜趋势增强,合计上限 10)。
+
+    规则:在榜天数越多、排名越靠前且上升,加分越高。
+    - 在榜 1 天 +2;连续在榜每天 +1(封顶 5)
+    - 排名 Top5 +2,Top3 +3
+    - 排名上升(比首次上榜更靠前)+2
+    """
+    if not info:
+        return 0
+    bonus = 0
+    days = info.get("on_list_days", 0)
+    rank = info.get("latest_rank", 99)
+    improved = info.get("rank_improved", False)
+    if days >= 1:
+        bonus += 2                      # 在榜基础分
+        bonus += min(3, days - 1)       # 连续在榜,每天+1 封顶3
+    if rank <= 5:
+        bonus += 2 if rank > 3 else 3   # Top5 +2,Top3 +3
+    if improved:
+        bonus += 2                      # 排名上升
+    return min(10, bonus)
 
 
 def _slim_health(health: dict) -> dict:

@@ -66,7 +66,7 @@ class PortfolioService:
         }
 
     def compute_and_save_equity_snapshot(self, account_id: int, trade_date: date) -> dict:
-        """计算并保存净值快照。"""
+        """计算并保存净值快照(返回含 created_at,匹配 EquitySnapshotResponse)。"""
         snap = self.compute_equity_snapshot(account_id, trade_date)
         self.repo.upsert_equity_snapshot(
             account_id=account_id, trade_date=snap["trade_date"],
@@ -74,6 +74,13 @@ class PortfolioService:
             total_equity=snap["total_equity"], exposure=snap["exposure"],
             peak_equity=snap["peak_equity"], drawdown=snap["drawdown"],
         )
+        # 保存后回读,取 DDL 生成的 created_at(修复 500: schema 要求该字段)
+        saved = self.repo.get_equity_snapshot(account_id, snap["trade_date"])
+        if saved:
+            snap["created_at"] = saved.get("created_at") or ""
+        else:
+            from datetime import datetime
+            snap["created_at"] = datetime.now().isoformat(timespec="seconds")
         return snap
 
     def compute_sector_exposure(self, account_id: int, trade_date: date) -> list[dict]:
