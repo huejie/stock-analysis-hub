@@ -15,6 +15,7 @@ from backend.trading.migrations import run_migrations
 from backend.trading.domain import DailyBar
 
 TEST_DB = "data/test_no_lookahead.db"
+BENCHMARKS = ["000300.SH", "000905.SH"]
 
 
 @pytest.fixture
@@ -80,9 +81,15 @@ def _seed_full_data(repo, signal_date, stock_code="000001.SZ"):
     # 基准行情:从 signal_date 往前推,确保覆盖到 signal_date 当天
     bench_start = signal_date - timedelta(days=100)
     benchmark_bars = _make_bars(bench_start, 101, start_price=3000, step=2)
-    repo.upsert_daily_bars([DailyBar(code="000300.SH", trade_date=b.trade_date,
-                                     open=b.open, high=b.high, low=b.low, close=b.close,
-                                     volume=1e8, source="test") for b in benchmark_bars])
+    for code in BENCHMARKS:
+        repo.upsert_daily_bars([
+            DailyBar(
+                code=code, trade_date=b.trade_date,
+                open=b.open, high=b.high, low=b.low, close=b.close,
+                volume=1e8, source="test",
+            )
+            for b in benchmark_bars
+        ])
     # 股票行情:从 signal_date 往前推,确保覆盖到 signal_date 当天
     stock_start = signal_date - timedelta(days=90)
     stock_bars = _make_bars(stock_start, 91, start_price=10, step=0.05)
@@ -103,18 +110,13 @@ def test_plan_generation_no_lookahead(repo):
 
     mds = MarketDataService(repo, provider=None)
     ps = PortfolioService(repo)
-    plan_svc = PlanService(repo, mds, ps)
+    plan_svc = PlanService(repo, mds, ps, benchmark_codes=BENCHMARKS)
 
-    # 第一次生成 t 日计划(可能 BLOCKED 如果数据门禁严格,用 try 捕获)
-    try:
-        r1 = plan_svc.generate_plan(
-            account_id=acc["id"], signal_date=signal_date.isoformat(),
-            stock_pool_version_id=1, strategy_version_id=strat["id"],
-        )
-        run_key_1 = r1["run_key"]
-    except Exception:
-        # 如果 BLOCKED(基准缺失等),跳过幂等验证,只验证指标层防未来函数已通过
-        pytest.skip("计划因数据门禁 BLOCKED,幂等验证在 test_plan_service 已覆盖")
+    r1 = plan_svc.generate_plan(
+        account_id=acc["id"], signal_date=signal_date.isoformat(),
+        stock_pool_version_id=1, strategy_version_id=strat["id"],
+    )
+    run_key_1 = r1["run_key"]
 
     # 插入 t+1 大涨数据(未来信息)
     future_bars = _make_bars(signal_date + timedelta(days=1), 5, start_price=50.0, step=5)
@@ -139,15 +141,12 @@ def test_force_new_version_supersedes_old(repo):
 
     mds = MarketDataService(repo, provider=None)
     ps = PortfolioService(repo)
-    plan_svc = PlanService(repo, mds, ps)
+    plan_svc = PlanService(repo, mds, ps, benchmark_codes=BENCHMARKS)
 
-    try:
-        r1 = plan_svc.generate_plan(
-            account_id=acc["id"], signal_date=signal_date.isoformat(),
-            stock_pool_version_id=1, strategy_version_id=strat["id"],
-        )
-    except Exception:
-        pytest.skip("计划因数据门禁 BLOCKED")
+    r1 = plan_svc.generate_plan(
+        account_id=acc["id"], signal_date=signal_date.isoformat(),
+        stock_pool_version_id=1, strategy_version_id=strat["id"],
+    )
 
     r2 = plan_svc.generate_plan(
         account_id=acc["id"], signal_date=signal_date.isoformat(),

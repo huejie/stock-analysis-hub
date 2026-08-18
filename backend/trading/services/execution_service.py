@@ -1,10 +1,10 @@
-"""成交服务:录入 + 原子更新(现金/持仓/审计)+ T+1 语义(spec §8.8/§12.5)。
+"""成交服务:原子录入 + T+1 语义(spec §8.8/§12.5)。
 
 T+1:买入当日 available_quantity 不变;跨交易日 lazy 滚动。
-原子性:repo 层无事务封装,但本服务按"先写 execution,再更新 account/position"顺序,
-失败时由调用方处理(execution 已幂等,重复 POST 安全)。
+原子性:现金、持仓、execution 和 audit 由 Repository 在同一事务内写入。
 """
-import json
+from datetime import date
+from typing import Callable
 
 
 class ExecutionService:
@@ -17,103 +17,79 @@ class ExecutionService:
                          client_execution_id: str, note: str = "",
                          plan_item_id: int | None = None) -> dict:
         """录入成交,原子更新现金/持仓/审计。"""
-        # 幂等检查:通过 repo 查重(避免在 service 层开 sqlite 连接绕过 repo)
-        existing = self.repo.get_execution_by_client_id(client_execution_id)
-        if existing:
-            return {"execution": existing, "position": self.repo.get_position(account_id, stock_code)}
-
-        account = self.repo.get_account(account_id)
-        if not account:
-            raise ValueError(f"账户 {account_id} 不存在")
-
-        trade_value = price * quantity
-        position = self.repo.get_position(account_id, stock_code)
-
-        if side == "BUY":
-            total_cost = trade_value + commission + tax
-            if account["cash_balance"] < total_cost:
-                raise ValueError(
-                    f"现金不足:需要 {total_cost},可用 {account['cash_balance']}"
-                )
-            # 更新现金
-            self.repo.update_account(account_id, {"cash_balance": account["cash_balance"] - total_cost})
-            # 更新持仓(平均成本混合)
-            new_qty = (position["quantity"] if position else 0) + quantity
-            if position:
-                old_cost = position["quantity"] * position["average_cost"]
-                new_avg = (old_cost + trade_value) / new_qty
-                # T+1: available 不变
-                self.repo.upsert_position(
-                    account_id=account_id, stock_code=stock_code,
-                    quantity=new_qty, available_quantity=position["available_quantity"],
-                    average_cost=new_avg, stock_name=position.get("stock_name"),
-                    initial_stop=position.get("initial_stop"),
-                    trailing_stop=position.get("trailing_stop"),
-                    opened_at=position.get("opened_at"),
-                )
-            else:
-                self.repo.upsert_position(
-                    account_id=account_id, stock_code=stock_code,
-                    quantity=new_qty, available_quantity=0,  # T+1
-                    average_cost=price,
-                )
-
-        elif side == "SELL":
-            if not position or position["quantity"] == 0:
-                raise ValueError(f"无 {stock_code} 持仓,无法卖出")
-            if position["available_quantity"] < quantity:
-                raise ValueError(
-                    f"可卖数量不足:需要 {quantity},可用 {position['available_quantity']}"
-                )
-            net_proceeds = trade_value - commission - tax
-            # 更新现金
-            self.repo.update_account(account_id, {"cash_balance": account["cash_balance"] + net_proceeds})
-            # 更新持仓
-            new_qty = position["quantity"] - quantity
-            new_avail = position["available_quantity"] - quantity
-            if new_qty == 0:
-                self.repo.delete_position(account_id, stock_code)
-            else:
-                self.repo.upsert_position(
-                    account_id=account_id, stock_code=stock_code,
-                    quantity=new_qty, available_quantity=new_avail,
-                    average_cost=position["average_cost"],
-                    stock_name=position.get("stock_name"),
-                    initial_stop=position.get("initial_stop"),
-                    trailing_stop=position.get("trailing_stop"),
-                    opened_at=position.get("opened_at"),
-                )
-        else:
-            raise ValueError(f"未知 side: {side}(仅支持 BUY/SELL)")
-
-        # 写 execution(repo.create_execution 也是幂等的,但前面已确认不重复)
-        execution = self.repo.create_execution(
+        return self.repo.record_execution_atomic(
             account_id=account_id, stock_code=stock_code, side=side,
             trade_date=trade_date, price=price, quantity=quantity,
             commission=commission, tax=tax, client_execution_id=client_execution_id,
             note=note, plan_item_id=plan_item_id,
         )
-        # 审计
-        self.repo.write_audit_log(
-            actor="user", action=f"EXECUTION_{side}", entity_type="execution",
-            entity_id=str(execution["id"]),
-            after_json=json.dumps(execution, ensure_ascii=False),
-        )
-        return {"execution": execution, "position": self.repo.get_position(account_id, stock_code)}
 
-    def roll_t1_available(self, account_id: int, new_trade_date: str) -> None:
-        """T+1 滚动:把所有持仓的 available_quantity 设为 quantity。
+    def roll_t1_available(self, account_id: int, new_trade_date: str) -> int:
+        """T+1 滚动:解锁目标日前买入的持仓，保留当日买入冻结量。
 
         由调用方在新交易日首次访问时触发(lazy compute)。
         """
-        positions = self.repo.get_positions(account_id)
-        for p in positions:
-            if p["quantity"] > 0 and p["available_quantity"] != p["quantity"]:
-                self.repo.upsert_position(
-                    account_id=account_id, stock_code=p["stock_code"],
-                    quantity=p["quantity"], available_quantity=p["quantity"],
-                    average_cost=p["average_cost"], stock_name=p.get("stock_name"),
-                    initial_stop=p.get("initial_stop"),
-                    trailing_stop=p.get("trailing_stop"),
-                    opened_at=p.get("opened_at"),
+        return self.repo.roll_t1_available_atomic(
+            account_id, new_trade_date
+        )
+
+    def reconcile_orders(
+        self,
+        trade_date: date | str,
+        *,
+        check_fence: Callable[[], None] | None = None,
+    ) -> dict:
+        """Roll T+1 availability and persist missed conditional buys.
+
+        Only plan items whose target trading day matches ``trade_date`` are
+        considered.  The PENDING -> NOT_FILLED transition is compare-and-set,
+        so replaying the job is idempotent.
+        """
+        target = (
+            date.fromisoformat(trade_date)
+            if isinstance(trade_date, str)
+            else trade_date
+        )
+        target_str = target.isoformat()
+        fence = check_fence or (lambda: None)
+
+        accounts_rolled = 0
+        for account in self.repo.list_accounts(active_only=True):
+            fence()
+            if self.roll_t1_available(account["id"], target_str):
+                accounts_rolled += 1
+
+        items_not_filled = 0
+        for run in self.repo.list_plan_runs():
+            fence()
+            if run.get("target_trade_date") != target_str:
+                continue
+            if run.get("status") not in ("READY", "PARTIAL", "PUBLISHED"):
+                continue
+            for item in self.repo.get_plan_items(run["id"]):
+                fence()
+                if item.get("action") != "CONDITIONAL_BUY":
+                    continue
+                if item.get("execution_status") != "PENDING":
+                    continue
+                do_not_chase = item.get("do_not_chase_price")
+                if do_not_chase is None:
+                    continue
+                bars = self.repo.get_daily_bars(
+                    [item["stock_code"]], target, target
                 )
+                if not bars:
+                    continue
+                open_price = bars[0].get("open")
+                if open_price is None or open_price <= do_not_chase:
+                    continue
+                fence()
+                if self.repo.update_plan_item_execution_status(
+                    item["id"], "PENDING", "NOT_FILLED"
+                ):
+                    items_not_filled += 1
+
+        return {
+            "accounts_rolled": accounts_rolled,
+            "items_not_filled": items_not_filled,
+        }

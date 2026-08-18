@@ -1,0 +1,56 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8888 --workers 1
+    volumes:
+      - ../data:/app/data
+      - ../uploads:/app/uploads
+    env_file:
+      - ../.env
+    environment:
+      DB_PATH: /app/data/stock.db
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8888/api/health', timeout=4)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: python -m backend.trading.jobs.scheduler
+    volumes:
+      - ../data:/app/data
+    env_file:
+      - ../.env
+    environment:
+      DB_PATH: /app/data/stock.db
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:stable-alpine
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./htpasswd:/etc/nginx/.htpasswd:ro
+    restart: unless-stopped

@@ -1,5 +1,10 @@
 import os
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from threading import Barrier
+
 import pytest
 from backend.trading.repository import TradingRepository
 from backend.trading.migrations import run_migrations
@@ -149,6 +154,150 @@ def test_list_executions(repo):
                           commission=5, tax=1, client_execution_id="e2")
     execs = repo.list_executions(acc["id"], start="2026-07-22", end="2026-07-23")
     assert len(execs) == 2
+
+
+@pytest.fixture
+def atomic_repos(tmp_path):
+    db_path = str(tmp_path / "atomic-execution.db")
+    run_migrations(db_path)
+    return TradingRepository(db_path), TradingRepository(db_path)
+
+
+@pytest.mark.parametrize(
+    ("buy_delay", "roll_delay"),
+    [(0, 0), (0, 0.02), (0.02, 0)],
+    ids=["simultaneous", "buy-first", "roll-first"],
+)
+def test_concurrent_buy_and_t1_roll_keep_position_consistent(
+    atomic_repos, buy_delay, roll_delay
+):
+    buy_repo, roll_repo = atomic_repos
+    account = buy_repo.create_account(
+        name="main", initial_equity=100_000, cash_balance=100_000
+    )
+    buy_repo.upsert_position(
+        account_id=account["id"],
+        stock_code="000001.SZ",
+        stock_name="平安银行",
+        quantity=100,
+        available_quantity=0,
+        average_cost=10,
+        initial_stop=8,
+        trailing_stop=9,
+        opened_at="2026-08-18",
+    )
+    barrier = Barrier(2)
+
+    def buy():
+        barrier.wait()
+        time.sleep(buy_delay)
+        return buy_repo.record_execution_atomic(
+            account_id=account["id"],
+            stock_code="000001.SZ",
+            side="BUY",
+            trade_date="2026-08-19",
+            price=20,
+            quantity=100,
+            client_execution_id=f"concurrent-{buy_delay}-{roll_delay}",
+        )
+
+    def roll():
+        barrier.wait()
+        time.sleep(roll_delay)
+        return roll_repo.roll_t1_available_atomic(
+            account["id"], "2026-08-19"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        buy_future = executor.submit(buy)
+        roll_future = executor.submit(roll)
+        buy_result = buy_future.result(timeout=5)
+        assert roll_future.result(timeout=5) == 1
+
+    final_account = buy_repo.get_account(account["id"])
+    final_position = buy_repo.get_position(account["id"], "000001.SZ")
+    executions = buy_repo.list_executions(account["id"])
+    audits = buy_repo.list_audit_logs(action="EXECUTION_BUY")
+
+    assert buy_result["execution"]["reused"] is False
+    assert final_account["cash_balance"] == 98_000
+    assert final_position["quantity"] == 200
+    assert final_position["available_quantity"] == 100
+    assert final_position["average_cost"] == pytest.approx(15)
+    assert final_position["stock_name"] == "平安银行"
+    assert final_position["initial_stop"] == 8
+    assert final_position["trailing_stop"] == 9
+    assert len(executions) == 1
+    assert len(audits) == 1
+
+
+def test_atomic_execution_rolls_back_cash_position_and_execution_if_audit_fails(
+    atomic_repos,
+):
+    repo, _ = atomic_repos
+    account = repo.create_account(
+        name="main", initial_equity=100_000, cash_balance=100_000
+    )
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_execution_audit "
+            "BEFORE INSERT ON trade_audit_logs "
+            "WHEN NEW.action='EXECUTION_BUY' BEGIN "
+            "SELECT RAISE(ABORT, 'audit failed'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        repo.record_execution_atomic(
+            account_id=account["id"],
+            stock_code="000001.SZ",
+            side="BUY",
+            trade_date="2026-08-19",
+            price=10,
+            quantity=100,
+            client_execution_id="rollback-audit",
+        )
+
+    assert repo.get_account(account["id"])["cash_balance"] == 100_000
+    assert repo.get_position(account["id"], "000001.SZ") is None
+    assert repo.list_executions(account["id"]) == []
+    assert repo.list_audit_logs(action="EXECUTION_BUY") == []
+
+
+def test_atomic_t1_roll_updates_only_available_quantity(atomic_repos):
+    repo, _ = atomic_repos
+    account = repo.create_account(
+        name="main", initial_equity=100_000, cash_balance=100_000
+    )
+    repo.upsert_position(
+        account_id=account["id"],
+        stock_code="000001.SZ",
+        stock_name="平安银行",
+        quantity=100,
+        available_quantity=0,
+        average_cost=10,
+        initial_stop=8,
+        trailing_stop=9,
+        opened_at="2026-08-18",
+    )
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute(
+            "CREATE TRIGGER reject_stale_position_overwrite "
+            "BEFORE UPDATE OF quantity, average_cost, stock_name, "
+            "initial_stop, trailing_stop, opened_at ON trade_positions "
+            "BEGIN SELECT RAISE(ABORT, 'stale overwrite'); END"
+        )
+
+    assert repo.roll_t1_available_atomic(
+        account["id"], "2026-08-19"
+    ) == 1
+    position = repo.get_position(account["id"], "000001.SZ")
+    assert position["quantity"] == 100
+    assert position["available_quantity"] == 100
+    assert position["average_cost"] == 10
+    assert position["stock_name"] == "平安银行"
+    assert position["initial_stop"] == 8
+    assert position["trailing_stop"] == 9
+    assert position["opened_at"] == "2026-08-18"
 
 
 # ---- Equity Snapshot ----

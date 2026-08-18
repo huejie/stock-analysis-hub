@@ -5,6 +5,7 @@ import { useFormat } from '../../composables/useFormat'
 import type {
   PlanRunResponse,
   PlanRunDetail,
+  PlanRunSummary,
   PlanItem,
   StockPoolListItem,
   Strategy,
@@ -20,7 +21,7 @@ const api = useTradingApi()
 const { formatMoney, formatPercent, formatPrice, formatQty } = useFormat()
 
 // 列表与详情
-const plans = ref<PlanRunDetail[]>([])
+const plans = ref<PlanRunSummary[]>([])
 const selected = ref<PlanRunDetail | null>(null)
 
 // 表单选项
@@ -36,6 +37,10 @@ const publishing = ref(false)
 const error = ref('')
 const success = ref('')
 const publishError = ref('')
+let listRequestVersion = 0
+let detailRequestVersion = 0
+let generateRequestVersion = 0
+let publishRequestVersion = 0
 
 // 生成表单
 function todayStr(): string {
@@ -109,9 +114,18 @@ const sortedItems = computed<PlanItem[]>(() =>
   selected.value ? sortItems(selected.value.items) : [],
 )
 
+const selectedSummary = computed<PlanRunSummary | null>(() => {
+  if (!selected.value || props.accountId == null) return null
+  return plans.value.find(
+    plan => plan.id === selected.value?.id && plan.account_id === props.accountId,
+  ) ?? null
+})
+
 // ---- 发布按钮可用性(spec §12.3)----
 const publishState = computed<{ kind: 'publish' | 'published' | 'disabled'; tip: string }>(() => {
-  if (!selected.value) return { kind: 'disabled', tip: '请先选择计划' }
+  if (!selected.value || !selectedSummary.value) {
+    return { kind: 'disabled', tip: '请先选择当前账户计划' }
+  }
   const status = selected.value.status
   if (status === 'PUBLISHED') return { kind: 'published', tip: '该计划已发布' }
   if (status === 'READY' || status === 'PARTIAL') {
@@ -154,37 +168,78 @@ async function loadOptions() {
 }
 
 async function loadList() {
+  const accountId = props.accountId
+  const requestVersion = ++listRequestVersion
   loadingList.value = true
   error.value = ''
+  if (accountId == null) {
+    plans.value = []
+    selected.value = null
+    loadingList.value = false
+    return
+  }
   try {
-    const res = await api.listPlanRuns()
-    plans.value = res.plan_runs
+    const res = await api.listPlanRuns(undefined, undefined, accountId)
+    if (requestVersion !== listRequestVersion || props.accountId !== accountId) return
+    plans.value = res.plan_runs.filter(plan => plan.account_id === accountId)
+    if (!selectedSummary.value) selected.value = null
     // 若当前没有选中,自动选第一条
     if (!selected.value && plans.value[0]) {
-      await selectPlan(plans.value[0].id)
+      await selectPlan(plans.value[0].id, accountId)
     }
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (requestVersion === listRequestVersion && props.accountId === accountId) {
+      error.value = e instanceof Error ? e.message : String(e)
+    }
   } finally {
-    loadingList.value = false
+    if (requestVersion === listRequestVersion && props.accountId === accountId) {
+      loadingList.value = false
+    }
   }
 }
 
-async function selectPlan(id: number) {
+async function selectPlan(id: number, accountId = props.accountId) {
+  const summary = plans.value.find(
+    plan => plan.id === id && plan.account_id === accountId,
+  )
+  if (accountId == null || !summary) {
+    selected.value = null
+    return
+  }
+  if (publishing.value && selected.value?.id !== id) {
+    publishRequestVersion += 1
+    publishing.value = false
+    showPublishConfirm.value = false
+  }
+  const requestVersion = ++detailRequestVersion
   loadingDetail.value = true
   publishError.value = ''
   try {
-    selected.value = await api.getPlanRun(id)
+    const detail = await api.getPlanRun(id)
+    if (
+      requestVersion === detailRequestVersion
+      && props.accountId === accountId
+      && plans.value.some(
+        plan => plan.id === id && plan.account_id === accountId,
+      )
+    ) {
+      selected.value = detail
+    }
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e)
-    selected.value = null
+    if (requestVersion === detailRequestVersion && props.accountId === accountId) {
+      error.value = e instanceof Error ? e.message : String(e)
+      selected.value = null
+    }
   } finally {
-    loadingDetail.value = false
+    if (requestVersion === detailRequestVersion && props.accountId === accountId) {
+      loadingDetail.value = false
+    }
   }
 }
 
 async function handleGenerate() {
-  if (props.accountId == null) {
+  const accountId = props.accountId
+  if (accountId == null) {
     error.value = '请先选择账户'
     return
   }
@@ -192,49 +247,103 @@ async function handleGenerate() {
     error.value = '请选择股票池版本与策略版本'
     return
   }
+  const requestVersion = ++generateRequestVersion
   generating.value = true
   error.value = ''
   success.value = ''
   try {
     const result: PlanRunResponse = await api.createPlanRun({
-      account_id: props.accountId,
+      account_id: accountId,
       signal_date: form.value.signal_date,
       stock_pool_version_id: form.value.stock_pool_version_id,
       strategy_version_id: form.value.strategy_version_id,
       force_new_version: form.value.force_new_version,
     })
+    if (
+      requestVersion !== generateRequestVersion
+      || props.accountId !== accountId
+    ) return
     success.value = result.reused
       ? `复用已有计划 #${result.id}(状态 ${result.status})`
       : `计划已生成 #${result.id}(状态 ${result.status})`
     form.value.force_new_version = false
     await loadList()
-    await selectPlan(result.id)
+    if (
+      requestVersion !== generateRequestVersion
+      || props.accountId !== accountId
+    ) return
+    await selectPlan(result.id, accountId)
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (
+      requestVersion === generateRequestVersion
+      && props.accountId === accountId
+    ) {
+      error.value = e instanceof Error ? e.message : String(e)
+    }
   } finally {
-    generating.value = false
+    if (
+      requestVersion === generateRequestVersion
+      && props.accountId === accountId
+    ) {
+      generating.value = false
+    }
   }
 }
 
 function openPublishConfirm() {
   publishError.value = ''
+  if (!selectedSummary.value) {
+    publishError.value = '只能发布当前账户计划'
+    return
+  }
   showPublishConfirm.value = true
 }
 
 async function handlePublish() {
-  if (!selected.value) return
+  const accountId = props.accountId
+  const summary = selectedSummary.value
+  if (!selected.value || !summary || accountId == null) {
+    publishError.value = '只能发布当前账户计划'
+    showPublishConfirm.value = false
+    return
+  }
+  const planId = selected.value.id
+  const requestVersion = ++publishRequestVersion
   publishing.value = true
   publishError.value = ''
   try {
-    const res = await api.publishPlanRun(selected.value.id)
+    const res = await api.publishPlanRun(planId)
+    if (
+      requestVersion !== publishRequestVersion
+      || props.accountId !== accountId
+      || selected.value?.id !== planId
+      || selectedSummary.value?.id !== planId
+    ) return
     success.value = `计划 #${res.id} 已发布(${res.published_at})`
     showPublishConfirm.value = false
-    await selectPlan(selected.value.id)
+    await selectPlan(planId, accountId)
+    if (
+      requestVersion !== publishRequestVersion
+      || props.accountId !== accountId
+      || selected.value?.id !== planId
+    ) return
     await loadList()
   } catch (e: unknown) {
-    publishError.value = e instanceof Error ? e.message : String(e)
+    if (
+      requestVersion === publishRequestVersion
+      && props.accountId === accountId
+      && selected.value?.id === planId
+    ) {
+      publishError.value = e instanceof Error ? e.message : String(e)
+    }
   } finally {
-    publishing.value = false
+    if (
+      requestVersion === publishRequestVersion
+      && props.accountId === accountId
+      && selected.value?.id === planId
+    ) {
+      publishing.value = false
+    }
   }
 }
 
@@ -246,8 +355,18 @@ function cancelPublish() {
 watch(
   () => props.accountId,
   (id) => {
+    listRequestVersion += 1
+    detailRequestVersion += 1
+    generateRequestVersion += 1
+    publishRequestVersion += 1
     selected.value = null
     plans.value = []
+    loadingList.value = false
+    loadingDetail.value = false
+    showPublishConfirm.value = false
+    publishing.value = false
+    generating.value = false
+    publishError.value = ''
     success.value = ''
     error.value = ''
     if (id != null) {
@@ -347,7 +466,6 @@ onMounted(async () => {
             </span>
             <span class="pi-date">{{ p.signal_date }} → {{ p.target_trade_date }}</span>
             <span class="pi-id">#{{ p.id }}</span>
-            <span v-if="p.degraded" class="pi-degraded">降级</span>
           </button>
         </div>
       </section>

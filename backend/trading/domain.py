@@ -5,6 +5,7 @@
 """
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -68,29 +69,50 @@ class SectorMembership:
 
 # ---- 代码规范化工具 ----
 
-def normalize_stock_code(raw: str) -> str:
-    """将各种输入形式规范化为 000001.SZ / 600000.SH / 000300.SH。
+InstrumentKind = Literal["stock", "index"]
+KNOWN_INDEX_MARKETS = {"000300": "SH", "000905": "SH"}
+
+
+def _parse_explicit_market(raw: str) -> str | None:
+    s = raw.strip().upper().replace(" ", "")
+    if s.endswith((".SH", ".SZ")):
+        digits, market = s[:-3], s[-2:]
+        if len(digits) == 6 and digits.isdigit():
+            return f"{digits}.{market}"
+        raise ValueError(f"无法规范化的股票代码: {raw}")
+    if s.startswith(("SH", "SZ")):
+        market, digits = s[:2], s[2:]
+        if len(digits) == 6 and digits.isdigit():
+            return f"{digits}.{market}"
+        raise ValueError(f"无法规范化的股票代码: {raw}")
+    return None
+
+
+def _six_digits(raw: str) -> str:
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 6:
+        return digits
+    raise ValueError(f"无法规范化的股票代码: {raw}")
+
+
+def normalize_stock_code(raw: str, *, kind: InstrumentKind = "stock") -> str:
+    """将股票或已知指数代码规范化为带市场后缀的形式。
 
     接受: '000001' / 'sz000001' / '000001.SZ' / 'SZ000001'
-    指数: '000300' -> '000300.SH'(沪深300在上交所)
+    裸代码默认按股票市场规则解析；裸指数必须显式指定 ``kind='index'``。
     """
-    s = raw.strip().upper().replace(" ", "")
-    # 已带后缀
-    if s.endswith(".SH") or s.endswith(".SZ"):
-        return s
-    # 形如 SZ000001
-    if s.startswith("SH") or s.startswith("SZ"):
-        return f"{s[2:]}.{s[:2]}"
-    # 纯 6 位数字
-    digits = "".join(c for c in s if c.isdigit())
-    if len(digits) == 6:
-        # 000xxx 中 0003xx/0009xx 是上交所指数(沪深300/中证500),优先判
-        if digits.startswith(("0003", "0009")):
-            return f"{digits}.SH"
-        # 0xx/3xx(深市主板/创业板)在深交所
-        if digits.startswith(("0", "3")):
-            return f"{digits}.SZ"
-        # 6xx/601/603/605/688 等在上交所
+    normalized = _parse_explicit_market(raw)
+    if normalized is not None:
+        return normalized
+    digits = _six_digits(raw)
+    if kind == "index":
+        market = KNOWN_INDEX_MARKETS.get(digits)
+        if market is None:
+            raise ValueError(f"未知裸指数代码: {raw}")
+        return f"{digits}.{market}"
+    if digits.startswith(("0", "3")):
+        return f"{digits}.SZ"
+    if digits.startswith("6"):
         return f"{digits}.SH"
     raise ValueError(f"无法规范化的股票代码: {raw}")
 

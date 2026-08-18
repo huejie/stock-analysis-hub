@@ -7,7 +7,7 @@ import type { Strategy, StrategyActivateResponse } from '../../types/trading'
 const api = useTradingApi()
 const { formatPercent } = useFormat()
 
-// spec §8.2 默认参数元数据(标签/默认值/范围/格式/风险解释)
+// 仅保留计划引擎实际读取的策略参数；账户级限制在账户管理中维护。
 interface ParamMeta {
   key: string
   label: string
@@ -18,16 +18,15 @@ interface ParamMeta {
   highRisk: boolean
   risk: string
 }
-const PARAM_META: ParamMeta[] = [
-  { key: 'risk_per_trade', label: '单笔账户风险', default: 0.005, min: 0.001, max: 0.05, format: 'percent', highRisk: true, risk: '提高单笔风险会放大每笔亏损' },
-  { key: 'max_single_position', label: '单只股票仓位上限', default: 0.15, min: 0.01, max: 1.0, format: 'percent', highRisk: false, risk: '过高导致集中度风险' },
-  { key: 'max_total_exposure', label: '总仓位上限', default: 0.60, min: 0.05, max: 1.0, format: 'percent', highRisk: true, risk: '提高总仓位增加整体风险暴露' },
-  { key: 'max_sector_exposure', label: '同行业仓位上限', default: 0.30, min: 0.05, max: 1.0, format: 'percent', highRisk: false, risk: '行业集中度过高' },
-  { key: 'max_positions', label: '最大持仓数量', default: 5, min: 1, max: 20, format: 'int', highRisk: true, risk: '增加持仓数分散管理精力' },
-  { key: 'max_drawdown_limit', label: '账户回撤暂停阈值', default: 0.08, min: 0.02, max: 0.5, format: 'percent', highRisk: true, risk: '放宽回撤限制可能造成更大亏损' },
+const EDITABLE_STRATEGY_PARAMS: ParamMeta[] = [
   { key: 'min_score', label: '最低候选评分', default: 70, min: 0, max: 100, format: 'int', highRisk: false, risk: '降低评分门槛纳入更多低质量候选' },
-  { key: 'min_stop_distance', label: '最小止损距离', default: 0.03, min: 0.01, max: 0.05, format: 'percent', highRisk: false, risk: '过小止损易被震出' },
-  { key: 'max_stop_distance', label: '最大止损距离', default: 0.10, min: 0.05, max: 0.20, format: 'percent', highRisk: false, risk: '过大止损单笔亏损增加' },
+  { key: 'risk_per_trade', label: '策略单笔风险', default: 0.005, min: 0.001, max: 0.05, format: 'percent', highRisk: true, risk: '提高单笔风险会放大每笔亏损' },
+  { key: 'max_risk', label: '策略单笔风险上限', default: 0.005, min: 0.001, max: 0.05, format: 'percent', highRisk: true, risk: '提高风险上限会放宽单笔风险约束' },
+]
+
+const FIXED_RULES = [
+  '固定规则：最小止损距离 3%',
+  '固定规则：最大止损距离 10%',
 ]
 
 const strategies = ref<Strategy[]>([])
@@ -49,8 +48,16 @@ const activateResult = ref<StrategyActivateResponse | null>(null)
 
 function initFormParams() {
   const p: Record<string, number> = {}
-  for (const m of PARAM_META) p[m.key] = m.default
+  for (const m of EDITABLE_STRATEGY_PARAMS) p[m.key] = m.default
   return p
+}
+
+function serializeEditableParams(): Record<string, number> {
+  const params: Record<string, number> = {}
+  for (const m of EDITABLE_STRATEGY_PARAMS) {
+    params[m.key] = formParams.value[m.key] ?? m.default
+  }
+  return params
 }
 
 function fmtVal(v: number | undefined, meta: ParamMeta): string {
@@ -85,14 +92,20 @@ function getParam(key: string, params: Record<string, unknown> | undefined): num
   return typeof v === 'number' ? v : undefined
 }
 
+function getEditableParamValue(meta: ParamMeta, params: Record<string, unknown> | undefined): number {
+  const value = getParam(meta.key, params)
+  if (value != null) return value
+  if (meta.key === 'max_risk') return getParam('risk_per_trade', params) ?? meta.default
+  return meta.default
+}
+
 function openCreateForm() {
   // 用当前 ACTIVE 策略的参数初始化(如有),否则用默认
   const active = strategies.value.find(s => s.status === 'ACTIVE')
   formParams.value = initFormParams()
   if (active) {
-    for (const m of PARAM_META) {
-      const v = getParam(m.key, active.params_json)
-      if (v != null) formParams.value[m.key] = v
+    for (const m of EDITABLE_STRATEGY_PARAMS) {
+      formParams.value[m.key] = getEditableParamValue(m, active.params_json)
     }
     formCode.value = active.strategy_code
   }
@@ -105,9 +118,9 @@ function openCreateForm() {
 function checkHighRiskBeforeCreate(): boolean {
   const active = strategies.value.find(s => s.status === 'ACTIVE')
   const changes: string[] = []
-  for (const m of PARAM_META) {
+  for (const m of EDITABLE_STRATEGY_PARAMS) {
     if (!m.highRisk) continue
-    const oldVal = active ? getParam(m.key, active.params_json) ?? m.default : m.default
+    const oldVal = active ? getEditableParamValue(m, active.params_json) : m.default
     const newVal = formParams.value[m.key] ?? m.default
     if (newVal > oldVal) {
       changes.push(`${m.label}: ${fmtVal(oldVal, m)} → ${fmtVal(newVal, m)}`)
@@ -134,7 +147,7 @@ async function doCreate() {
     const created = await api.createStrategy({
       strategy_code: formCode.value,
       name: formName.value || `v${Date.now()}`,
-      params_json: { ...formParams.value },
+      params_json: serializeEditableParams(),
     })
     success.value = `草稿已创建: ${created.name} (v${created.version_no})`
     showCreateForm.value = false
@@ -206,15 +219,19 @@ onMounted(loadStrategies)
           </tr>
         </thead>
         <tbody>
-          <tr v-for="m in PARAM_META" :key="m.key" :class="{ 'high-risk-row': m.highRisk }">
+          <tr v-for="m in EDITABLE_STRATEGY_PARAMS" :key="m.key" :class="{ 'high-risk-row': m.highRisk }">
             <td>{{ m.label }}<span v-if="m.highRisk" class="risk-tag">高风险</span></td>
-            <td>{{ fmtVal(getParam(m.key, selected.params_json) ?? m.default, m) }}</td>
+            <td>{{ fmtVal(getEditableParamValue(m, selected.params_json), m) }}</td>
             <td>{{ fmtVal(m.default, m) }}</td>
             <td>{{ fmtVal(m.min, m) }} ~ {{ fmtVal(m.max, m) }}</td>
             <td class="risk-cell">{{ m.risk }}</td>
           </tr>
         </tbody>
       </table>
+      <div class="rules-guidance">
+        <p v-for="rule in FIXED_RULES" :key="rule">{{ rule }}</p>
+        <p>账户风险参数请在账户管理中修改</p>
+      </div>
       <!-- 激活按钮(仅 DRAFT) -->
       <div v-if="selected.status === 'DRAFT'" class="activate-section">
         <button class="btn-activate" :disabled="loading" @click="handleActivate(selected.id)">
@@ -253,15 +270,20 @@ onMounted(loadStrategies)
           <input v-model="formName" type="text" placeholder="v2">
         </div>
         <div class="form-params">
-          <div v-for="m in PARAM_META" :key="m.key" class="param-edit">
+          <div v-for="m in EDITABLE_STRATEGY_PARAMS" :key="m.key" class="param-edit">
             <label>{{ m.label }}<span v-if="m.highRisk" class="risk-tag">高风险</span></label>
             <input
               v-model.number="formParams[m.key]"
+              :name="m.key"
               type="number" :step="m.format === 'percent' ? '0.001' : '1'"
               :min="m.min" :max="m.max"
             >
             <span class="param-range">范围 {{ fmtVal(m.min, m) }} ~ {{ fmtVal(m.max, m) }}</span>
           </div>
+        </div>
+        <div class="rules-guidance">
+          <p v-for="rule in FIXED_RULES" :key="rule">{{ rule }}</p>
+          <p>账户风险参数请在账户管理中修改</p>
         </div>
         <div class="modal-actions">
           <button class="btn-cancel" @click="showCreateForm = false">取消</button>
@@ -344,6 +366,8 @@ h4 { margin: 0 0 0.5rem 0; color: #ccc; }
 .param-edit label { font-size: 0.8rem; color: #aaa; }
 .param-edit input { background: #111; color: #eee; border: 1px solid #333; border-radius: 4px; padding: 0.3rem; }
 .param-range { font-size: 0.7rem; color: #666; }
+.rules-guidance { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border-left: 2px solid #475569; color: #94a3b8; font-size: 0.85rem; }
+.rules-guidance p { margin: 0.2rem 0; }
 .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.75rem; }
 
 @media (max-width: 600px) {

@@ -15,51 +15,132 @@ const equity = ref<EquitySnapshot | null>(null)
 const latestPlan = ref<PlanRunDetail | null>(null)
 const health = ref<DataHealth | null>(null)
 const loading = ref(false)
-const error = ref('')
+const accountError = ref('')
+const equityError = ref('')
+const planError = ref('')
+const healthError = ref('')
+let loadVersion = 0
+let planRequestVersion = 0
 
-async function loadAll() {
-  if (props.accountId == null) {
-    // 无选中账户时,尝试加载 active 账户
+function isCurrentLoad(version: number, requestedAccountId: number | null): boolean {
+  return version === loadVersion && props.accountId === requestedAccountId
+}
+
+function isCurrentPlanRequest(
+  version: number,
+  requestedAccountId: number | null,
+): boolean {
+  return version === planRequestVersion && props.accountId === requestedAccountId
+}
+
+async function loadLatestPlan(
+  accountId: number | null,
+  planVersion: number,
+  requestedAccountId: number | null,
+) {
+  if (accountId == null) return
+  try {
+    const res = await api.listPlanRuns(undefined, undefined, accountId)
+    if (!isCurrentPlanRequest(planVersion, requestedAccountId)) return
+    const accountPlans = res.plan_runs.filter(p => p.account_id === accountId)
+    const readyPlans = accountPlans.filter(p =>
+      ['READY', 'PARTIAL', 'PUBLISHED', 'BLOCKED'].includes(p.status)
+    )
+    const summary = readyPlans[0] ?? accountPlans[0]
+    if (!summary) return
+
     try {
-      const res = await api.listAccounts(true)
-      accounts.value = res.accounts
-      if (accounts.value.length > 0) {
-        account.value = accounts.value[0] ?? null
+      const detail = await api.getPlanRun(summary.id)
+      if (isCurrentPlanRequest(planVersion, requestedAccountId)) {
+        latestPlan.value = detail
       }
     } catch {
-      account.value = null
+      if (isCurrentPlanRequest(planVersion, requestedAccountId)) {
+        planError.value = '计划详情加载失败'
+      }
     }
-  } else {
-    try {
-      account.value = await api.getAccount(props.accountId)
-    } catch {
-      account.value = null
+  } catch {
+    if (isCurrentPlanRequest(planVersion, requestedAccountId)) {
+      planError.value = '计划列表加载失败'
     }
   }
-  if (!account.value) return
+}
 
+function retryLatestPlan() {
+  const requestedAccountId = props.accountId
+  const accountId = requestedAccountId ?? account.value?.id ?? null
+  const planVersion = ++planRequestVersion
+  latestPlan.value = null
+  planError.value = ''
+  void loadLatestPlan(accountId, planVersion, requestedAccountId)
+}
+
+async function fetchAccount(requestedAccountId: number | null): Promise<Account | null> {
+  if (requestedAccountId == null) {
+    // 无选中账户时,尝试加载 active 账户
+    const res = await api.listAccounts(true)
+    accounts.value = res.accounts
+    return accounts.value[0] ?? null
+  }
+  return api.getAccount(requestedAccountId)
+}
+
+async function loadAll() {
+  const version = ++loadVersion
+  const planVersion = ++planRequestVersion
+  const requestedAccountId = props.accountId
   loading.value = true
-  error.value = ''
+  account.value = null
+  equity.value = null
+  latestPlan.value = null
+  health.value = null
+  accountError.value = ''
+  equityError.value = ''
+  planError.value = ''
+  healthError.value = ''
   const today = new Date().toISOString().slice(0, 10)
 
-  // 并行加载净值/最近计划/数据健康
-  const tasks: Promise<void>[] = []
-  tasks.push(
-    api.getEquitySnapshot(account.value.id, today).then(e => { equity.value = e }).catch(() => { equity.value = null }),
+  let loadedAccount: Account | null = null
+  try {
+    loadedAccount = await fetchAccount(requestedAccountId)
+    if (!isCurrentLoad(version, requestedAccountId)) return
+    account.value = loadedAccount
+  } catch {
+    if (!isCurrentLoad(version, requestedAccountId)) return
+    accountError.value = '账户加载失败'
+  }
+
+  const planAccountId = requestedAccountId ?? loadedAccount?.id ?? null
+  const planTask = loadLatestPlan(
+    planAccountId,
+    planVersion,
+    requestedAccountId,
   )
-  tasks.push(
-    api.listPlanRuns().then(res => {
-      const readyPlans = res.plan_runs.filter(p =>
-        ['READY', 'PARTIAL', 'PUBLISHED', 'BLOCKED'].includes(p.status)
-      )
-      latestPlan.value = readyPlans[0] ?? res.plan_runs[0] ?? null
-    }).catch(() => { latestPlan.value = null }),
-  )
-  tasks.push(
-    api.getDataHealth().then(h => { health.value = h }).catch(() => { health.value = null }),
-  )
-  await Promise.all(tasks)
-  loading.value = false
+  const healthTask = api.getDataHealth()
+    .then(h => {
+      if (isCurrentLoad(version, requestedAccountId)) health.value = h
+    })
+    .catch(() => {
+      if (isCurrentLoad(version, requestedAccountId)) {
+        health.value = null
+        healthError.value = '数据健康加载失败'
+      }
+    })
+
+  const equityTask = loadedAccount
+    ? api.getEquitySnapshot(loadedAccount.id, today)
+      .then(e => {
+        if (isCurrentLoad(version, requestedAccountId)) equity.value = e
+      })
+      .catch(() => {
+        if (isCurrentLoad(version, requestedAccountId)) {
+          equity.value = null
+          equityError.value = '净值加载失败'
+        }
+      })
+    : Promise.resolve()
+  await Promise.all([planTask, healthTask, equityTask])
+  if (isCurrentLoad(version, requestedAccountId)) loading.value = false
 }
 
 const regimeLabel = (r: string | null): string => {
@@ -78,13 +159,16 @@ const statusColor = (s: string): string => {
            SUPERSEDED: '#666', FAILED: '#ef4444' }[s] ?? '#888'
 }
 
-onMounted(loadAll)
-watch(() => props.accountId, loadAll)
+onMounted(() => { void loadAll() })
+watch(() => props.accountId, () => { void loadAll() })
 </script>
 
 <template>
   <div class="dashboard">
-    <p v-if="error" class="msg error">{{ error }}</p>
+    <p v-if="accountError" class="msg error">{{ accountError }}</p>
+    <p v-if="equityError" class="msg error">{{ equityError }}</p>
+    <p v-if="planError" class="msg error">{{ planError }} <button type="button" @click="retryLatestPlan">重试</button></p>
+    <p v-if="healthError" class="msg error">{{ healthError }}</p>
     <div v-if="loading" class="loading-hint">加载中...</div>
 
     <template v-if="account">
@@ -115,9 +199,14 @@ watch(() => props.accountId, loadAll)
           </span>
         </div>
       </div>
+    </template>
 
-      <!-- 市场状态 + 最近计划 -->
-      <div class="dual-row">
+    <div v-else-if="!loading" class="empty-hint">
+      <p>暂无账户,请先在"持仓与成交"页面创建账户。</p>
+    </div>
+
+    <!-- 市场状态 + 最近计划 -->
+    <div class="dual-row">
         <div class="info-card">
           <h4>市场状态</h4>
           <div v-if="latestPlan" class="market-info">
@@ -133,7 +222,7 @@ watch(() => props.accountId, loadAll)
 
         <div class="info-card">
           <h4>最近计划</h4>
-          <div v-if="latestPlan" class="plan-info">
+          <div v-if="latestPlan?.items" class="plan-info">
             <span class="plan-status" :style="{ color: statusColor(latestPlan.status) }">
               {{ statusLabel(latestPlan.status) }}
             </span>
@@ -146,10 +235,10 @@ watch(() => props.accountId, loadAll)
           </div>
           <div v-else class="empty-hint">暂无计划</div>
         </div>
-      </div>
+    </div>
 
-      <!-- 数据健康摘要 -->
-      <div class="info-card">
+    <!-- 数据健康摘要 -->
+    <div class="info-card">
         <h4>数据健康</h4>
         <div v-if="health" class="health-info">
           <span class="health-status" :style="{ color: statusColor(health.overall_status === 'OK' ? 'READY' : health.overall_status === 'PARTIAL' ? 'PARTIAL' : 'BLOCKED') }">
@@ -160,18 +249,15 @@ watch(() => props.accountId, loadAll)
           <span class="health-time">更新: {{ health.generated_at }}</span>
         </div>
         <div v-else class="empty-hint">暂无数据健康报告</div>
-      </div>
+    </div>
 
+    <template v-if="account">
       <!-- 交易统计(Phase 5) -->
       <div class="info-card phase5-placeholder">
         <h4>交易统计 <span class="phase5-tag">Phase 5</span></h4>
         <p class="empty-hint">胜率 / 平均 R / 期望值 / 规则执行率将在 Phase 5(回测与复盘)就绪后展示。</p>
       </div>
     </template>
-
-    <div v-else-if="!loading" class="empty-hint">
-      <p>暂无账户,请先在"持仓与成交"页面创建账户。</p>
-    </div>
   </div>
 </template>
 

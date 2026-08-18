@@ -6,15 +6,17 @@ Phase 2: 账户、持仓、成交、净值快照（spec §12.5）。
 Phase 3: 策略版本、计划生成。
 Phase 5: 回测、复盘。
 
-data-jobs 创建任务记录后,通过 run_in_executor 后台执行行情抓取,前端轮询状态。
+data-jobs 只持久化 QUEUED 任务；独立 Scheduler/DataJobService 负责执行。
 """
 import hashlib
 import json
-from datetime import date, timedelta
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ..config import settings
+from .domain import normalize_stock_code
 from .providers.factory import get_provider
 from .repository import TradingRepository
 from .schemas import (
@@ -36,6 +38,7 @@ from .schemas import (
     EquitySnapshotResponse,
 )
 from .services.account_service import AccountService
+from .services.data_job_service import DataJobService
 from .services.execution_service import ExecutionService
 from .services.market_data_service import MarketDataService
 from .services.pool_service import PoolService
@@ -50,6 +53,7 @@ from .schemas import (
     StrategyActivateResponse,
     PlanRunCreateRequest,
     PlanRunResponse,
+    PlanRunSummaryResponse,
     PlanRunDetailResponse,
     PlanItemResponse,
     PlanPublishResponse,
@@ -59,28 +63,77 @@ from .schemas import (
     ReviewSummaryResponse,
 )
 from .errors import (
+    ExecutionIdempotencyConflictError,
     PlanBlockedError,
     PlanAlreadyPublishedError,
+    PlanGenerationFailedError,
+    PlanSupersededError,
     StrategyNotActiveError,
 )
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
-# 模块级单例（测试通过 monkeypatch 替换）
-trading_repo = TradingRepository(settings.db_path)
-pool_service = PoolService(trading_repo)
-market_data_service = MarketDataService(trading_repo, provider=get_provider())
-account_service = AccountService(trading_repo)
-execution_service = ExecutionService(trading_repo)
-portfolio_service = PortfolioService(trading_repo)
-strategy_service = StrategyService(trading_repo)
-plan_service = PlanService(trading_repo, market_data_service, portfolio_service)
-backtest_service = BacktestService(trading_repo)
-review_service = ReviewService(trading_repo)
+
+def _benchmark_codes(settings_obj=settings) -> list[str]:
+    return [
+        code.strip()
+        for code in settings_obj.trading_benchmark_codes.split(",")
+        if code.strip()
+    ]
 
 
-def _benchmark_codes() -> list[str]:
-    return [c.strip() for c in settings.trading_benchmark_codes.split(",") if c.strip()]
+# 名字保留给路由和既有测试；FastAPI lifespan 在接收请求前统一装配。
+runtime_provider = None
+trading_repo = None
+pool_service = None
+market_data_service = None
+data_job_service = None
+account_service = None
+execution_service = None
+portfolio_service = None
+strategy_service = None
+plan_service = None
+backtest_service = None
+review_service = None
+
+
+def configure_runtime(settings_obj=settings, provider=None) -> None:
+    """使用一个 DB、Provider 和服务图装配 Web 交易运行时。"""
+    global runtime_provider
+    global trading_repo, pool_service, market_data_service, data_job_service
+    global account_service, execution_service, portfolio_service
+    global strategy_service, plan_service, backtest_service, review_service
+
+    runtime_provider = (
+        provider if provider is not None else get_provider(settings_obj)
+    )
+    trading_repo = TradingRepository(settings_obj.db_path)
+    pool_service = PoolService(trading_repo)
+    market_data_service = MarketDataService(
+        trading_repo,
+        runtime_provider,
+        max_missing_ratio=settings_obj.trading_data_max_missing_ratio,
+    )
+    account_service = AccountService(trading_repo)
+    execution_service = ExecutionService(trading_repo)
+    portfolio_service = PortfolioService(trading_repo)
+    strategy_service = StrategyService(trading_repo)
+    plan_service = PlanService(
+        trading_repo,
+        market_data_service,
+        portfolio_service,
+        benchmark_codes=_benchmark_codes(settings_obj),
+    )
+    data_job_service = DataJobService(
+        trading_repo,
+        market_data_service,
+        settings_obj,
+        pool_service=pool_service,
+        execution_service=execution_service,
+        plan_service=plan_service,
+    )
+    backtest_service = BacktestService(trading_repo)
+    review_service = ReviewService(trading_repo)
 
 
 # ---- 股票池 ----
@@ -156,91 +209,61 @@ async def data_health(trade_date: str = Query(default="")):
 
 # ---- 数据任务 ----
 
-# 幂等保护:同 job_key 正在运行时不重复启动(spec §13.1 互斥语义)
-_running_job_keys: set[str] = set()
+def build_data_job_request(
+    req: DataJobCreateRequest, now: datetime | None = None
+) -> tuple[dict, str]:
+    """生成可重放的规范化请求和稳定幂等键。"""
+    timezone = ZoneInfo(settings.trading_timezone)
+    if now is None:
+        local_now = datetime.now(timezone)
+    elif now.tzinfo is None:
+        local_now = now.replace(tzinfo=timezone)
+    else:
+        local_now = now.astimezone(timezone)
 
-
-def _execute_data_job(job_id: int, job_key: str, req_data: dict) -> None:
-    """后台执行数据任务(在 run_in_executor 线程中调用)。
-
-    状态流转:RUNNING → SUCCEEDED(带 result) / FAILED(带 error)。
-    """
-    try:
-        trading_repo.update_job(job_id, status="RUNNING")
-        job_type = req_data.get("job_type", "")
-        trade_date_str = req_data.get("trade_date", "")
-        target = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
-
-        if job_type in ("update_bars", "validate_data"):
-            # 更新股票池全部 + 基准
-            pool_count = market_data_service.update_pool_bars("default", target)
-            benchmarks = [c.strip() for c in settings.trading_benchmark_codes.split(",") if c.strip()]
-            bench_count = market_data_service.update_benchmark(target, benchmarks)
-            result = {"pool_bars_updated": pool_count, "benchmark_bars_updated": bench_count}
-
-        elif job_type == "backfill_bars":
-            start_str = req_data.get("start_date")
-            end_str = req_data.get("end_date")
-            if not start_str or not end_str:
-                raise ValueError("backfill_bars 需要 start_date 和 end_date")
-            codes = req_data.get("stock_codes")
-            if not codes:
-                codes = trading_repo.get_latest_pool_codes("default")
-            # 分日回补
-            from datetime import timedelta
-            cur = date.fromisoformat(start_str)
-            end = date.fromisoformat(end_str)
-            total = 0
-            while cur <= end:
-                total += market_data_service.update_bars(codes, cur)
-                cur += timedelta(days=1)
-            result = {"bars_updated": total, "date_range": f"{start_str}~{end_str}"}
-
-        elif job_type == "refresh_calendar":
-            # Phase 5 简化:等价于 update_bars
-            pool_count = market_data_service.update_pool_bars("default", target)
-            result = {"bars_updated": pool_count}
-
-        else:
-            raise ValueError(f"未知 job_type: {job_type}")
-
-        trading_repo.update_job(job_id, status="SUCCEEDED", progress=1.0, result=result)
-    except Exception as e:
-        trading_repo.update_job(job_id, status="FAILED", error={"error": str(e)})
-    finally:
-        _running_job_keys.discard(job_key)
+    request = {
+        "trade_date": req.trade_date,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "stock_codes": (
+            sorted({normalize_stock_code(code) for code in req.stock_codes})
+            if req.stock_codes is not None
+            else None
+        ),
+    }
+    if req.job_type in {"update_bars", "validate_data"}:
+        request["trade_date"] = (
+            req.trade_date or local_now.date().isoformat()
+        )
+    canonical = {
+        "job_type": req.job_type,
+        **{key: value for key, value in request.items() if value is not None},
+    }
+    job_key = hashlib.sha256(
+        json.dumps(
+            canonical,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return request, job_key
 
 
 @router.post("/data-jobs", status_code=202)
 async def create_data_job(req: DataJobCreateRequest):
-    import asyncio
-    target = date.fromisoformat(req.trade_date) if req.trade_date else date.today()
-    job_key = hashlib.sha256(
-        f"{req.job_type}|{target.isoformat()}|{req.start_date}|{req.end_date}".encode()
-    ).hexdigest()[:16]
-
-    # 幂等:同 key 正在运行 → 不重复启动
-    if job_key in _running_job_keys:
-        existing = trading_repo.get_job_by_key(job_key) if hasattr(trading_repo, "get_job_by_key") else None
-        if existing:
-            return {"job_id": existing["id"], "status": "RUNNING", "job_key": job_key, "reused": True}
-
+    request, job_key = build_data_job_request(req)
     job_id = trading_repo.create_job(
         job_type=req.job_type,
         job_key=job_key,
-        request={"trade_date": target.isoformat(),
-                 "start_date": req.start_date, "end_date": req.end_date,
-                 "stock_codes": req.stock_codes, "job_type": req.job_type},
+        request=request,
     )
-    # 后台执行(参考 main.py lhb pool 更新模式)
-    _running_job_keys.add(job_key)
-    req_data = {"job_type": req.job_type, "trade_date": target.isoformat(),
-                "start_date": req.start_date, "end_date": req.end_date,
-                "stock_codes": req.stock_codes}
-    asyncio.get_running_loop().run_in_executor(
-        None, _execute_data_job, job_id, job_key, req_data
-    )
-    return {"job_id": job_id, "status": "QUEUED", "job_key": job_key}
+    job = trading_repo.get_job(job_id)
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "job_key": job_key,
+    }
 
 
 @router.get("/data-jobs/{job_id}")
@@ -251,8 +274,10 @@ async def get_data_job(job_id: int):
     return DataJobResponse(
         id=job["id"], job_type=job["job_type"], job_key=job["job_key"],
         status=job["status"], progress=job["progress"],
+        attempts=job["attempts"],
         created_at=job["created_at"], started_at=job["started_at"],
-        finished_at=job["finished_at"], error_json=job.get("error"),
+        finished_at=job["finished_at"], result_json=job.get("result"),
+        error_json=job.get("error"),
     ).model_dump()
 
 
@@ -337,6 +362,8 @@ async def record_execution(req: ExecutionCreateRequest):
     """
     try:
         result = execution_service.record_execution(**req.model_dump())
+    except ExecutionIdempotencyConflictError as e:
+        raise e.to_http_exception()
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {
@@ -468,7 +495,7 @@ async def activate_strategy(version_id: int):
 # ---- Phase 3: 计划 ----
 
 @router.post("/plan-runs")
-async def create_plan_run(req: PlanRunCreateRequest):
+async def create_plan_run(req: PlanRunCreateRequest, response: Response):
     """生成计划(10 步流程 + 幂等键,spec §9/§11.3)。
 
     幂等命中返回 reused=True 的已有 run;策略未激活 → 422;
@@ -485,8 +512,12 @@ async def create_plan_run(req: PlanRunCreateRequest):
         raise e.to_http_exception()
     except PlanBlockedError as e:
         raise e.to_http_exception()
+    except (PlanGenerationFailedError, PlanSupersededError) as e:
+        raise e.to_http_exception()
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if result["status"] in ("CREATED", "VALIDATING", "GENERATING"):
+        response.status_code = 202
     return PlanRunResponse(
         id=result["id"], run_key=result["run_key"], status=result["status"],
         signal_date=result["signal_date"],
@@ -497,10 +528,19 @@ async def create_plan_run(req: PlanRunCreateRequest):
 
 @router.get("/plan-runs")
 async def list_plan_runs(signal_date: str | None = Query(default=None),
-                         status: str | None = Query(default=None)):
-    """计划运行列表(可选 signal_date/status 过滤,spec §11.3)。"""
-    rows = trading_repo.list_plan_runs(signal_date=signal_date, status=status)
-    return {"plan_runs": rows}
+                         status: str | None = Query(default=None),
+                         account_id: int | None = Query(default=None)):
+    """计划运行列表(可选日期、状态、账户过滤,spec §11.3)。"""
+    rows = trading_repo.list_plan_runs(
+        signal_date=signal_date,
+        status=status,
+        account_id=account_id,
+    )
+    return {
+        "plan_runs": [
+            PlanRunSummaryResponse(**row).model_dump() for row in rows
+        ]
+    }
 
 
 @router.get("/plan-runs/{run_id}")
@@ -516,9 +556,9 @@ async def get_plan_run_detail(run_id: int):
         target_trade_date=detail["target_trade_date"],
         market_regime=detail.get("market_regime"),
         market_score=detail.get("market_score"),
-        degraded=detail.get("degraded", False),
+        degraded=detail["degraded"],
         recommended_exposure=detail.get("recommended_exposure"),
-        warnings=detail.get("warnings", []),
+        warnings=detail["warnings"],
         items=items,
         created_at=detail.get("created_at"),
         published_at=detail.get("published_at"),

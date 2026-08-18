@@ -106,6 +106,16 @@ def test_sync_from_hotlist(repo):
     assert codes == {"000636.SZ", "600664.SH"}
 
 
+def test_sync_from_hotlist_treats_bare_0009_code_as_stock(repo):
+    with sqlite3.connect(TEST_DB) as conn:
+        _seed_hotlist(conn, date.today().isoformat(), "000936", "华西股份", 1)
+
+    result = PoolService(repo).sync_from_hotlist()
+    version = repo.get_stock_pool_version(result["id"])
+
+    assert version["items"][0]["stock_code"] == "000936.SZ"
+
+
 def test_sync_from_hotlist_idempotent(repo):
     with sqlite3.connect(TEST_DB) as conn:
         _seed_hotlist(conn, date.today().isoformat(), "000636", "风华高科", 1)

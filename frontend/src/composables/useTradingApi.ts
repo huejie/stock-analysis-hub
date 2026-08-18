@@ -17,6 +17,7 @@ import type {
   PlanRunCreateRequest,
   PlanRunResponse,
   PlanRunDetail,
+  PlanRunSummary,
   PlanPublishResponse,
   AuditLog,
   StockBar,
@@ -96,12 +97,13 @@ export function useTradingApi() {
     // Plan Runs
     createPlanRun: (body: PlanRunCreateRequest) =>
       request<PlanRunResponse>('/api/trading/plan-runs', { method: 'POST', body: JSON.stringify(body) }),
-    listPlanRuns: (signalDate?: string, status?: string) => {
+    listPlanRuns: (signalDate?: string, status?: string, accountId?: number) => {
       const qs = new URLSearchParams()
       if (signalDate) qs.set('signal_date', signalDate)
       if (status) qs.set('status', status)
+      if (accountId != null) qs.set('account_id', String(accountId))
       const s = qs.toString()
-      return request<{ plan_runs: PlanRunDetail[] }>(`/api/trading/plan-runs${s ? '?' + s : ''}`)
+      return request<{ plan_runs: PlanRunSummary[] }>(`/api/trading/plan-runs${s ? '?' + s : ''}`)
     },
     getPlanRun: (id: number) =>
       request<PlanRunDetail>(`/api/trading/plan-runs/${id}`),

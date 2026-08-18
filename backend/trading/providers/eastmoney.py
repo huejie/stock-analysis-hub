@@ -8,7 +8,7 @@
 K 线接口采用 web.ifzq.gtimg.cn(appstock)的公开接口,响应结构稳定,与项目
 crawler.py 中 TENCENT_KLINE 一致;字段顺序(date,open,close,high,low,volume,amount,af,cpct)。
 """
-from datetime import date, timedelta
+from datetime import date
 import logging
 
 import httpx
@@ -19,7 +19,7 @@ from ..domain import (
     SectorMembership,
     TradeDay,
     bare_code,
-    market_prefix,
+    normalize_stock_code,
 )
 from .base import MarketDataProvider, ProviderError
 
@@ -53,9 +53,53 @@ class EastmoneyProvider:
         resp.raise_for_status()
         return resp.json()
 
-    def _secid(self, code: str) -> str:
-        """600000.SH -> '1.600000'(东方财富/腾讯 secid 形式)。"""
-        return f"{market_prefix(code)}.{bare_code(code)}"
+    def _tencent_symbol(self, code: str) -> str:
+        """000001.SZ -> ``sz000001`` (腾讯 fqkline 标识)。"""
+        exchange = code.rsplit(".", 1)[-1].lower()
+        return f"{exchange}{bare_code(code)}"
+
+    def _extract_klines(self, payload: dict, symbol: str, code: str) -> list:
+        """校验腾讯响应协议并返回请求证券的 K 线数组。"""
+        if not isinstance(payload, dict):
+            raise ProviderError(
+                self.name, f"腾讯 K 线协议错误 {code}: 顶层响应不是对象"
+            )
+
+        message = payload.get("msg")
+        if payload.get("code") != 0 or not isinstance(message, str) or message:
+            detail = (
+                message
+                if isinstance(message, str) and message
+                else repr(payload.get("code"))
+            )
+            raise ProviderError(
+                self.name, f"腾讯 K 线协议错误 {code}: {detail}"
+            )
+
+        data_node = payload.get("data")
+        if not isinstance(data_node, dict):
+            raise ProviderError(
+                self.name, f"腾讯 K 线协议错误 {code}: data 不是对象"
+            )
+
+        code_node = data_node.get(symbol)
+        if code_node is None:
+            return []
+        if not isinstance(code_node, dict):
+            raise ProviderError(
+                self.name, f"腾讯 K 线协议错误 {code}: 证券节点不是对象"
+            )
+
+        qfqday = code_node.get("qfqday")
+        if qfqday is None or (isinstance(qfqday, list) and not qfqday):
+            klines = code_node.get("day", qfqday or [])
+        else:
+            klines = qfqday
+        if not isinstance(klines, list):
+            raise ProviderError(
+                self.name, f"腾讯 K 线协议错误 {code}: K 线节点不是数组"
+            )
+        return klines
 
     # ---- K 线解析 ----
 
@@ -91,25 +135,29 @@ class EastmoneyProvider:
 
     def get_daily_bars(self, codes: list[str], start: date, end: date) -> list[DailyBar]:
         results: list[DailyBar] = []
-        for code in codes:
+        for raw_code in codes:
+            code = normalize_stock_code(raw_code, kind="stock")
+            symbol = self._tencent_symbol(code)
             try:
                 payload = self._http_get(_KLINE_API, params={
-                    "param": f"{self._secid(code)},day,{start.isoformat()},{end.isoformat()},640,qfq",
+                    "param": f"{symbol},day,{start.isoformat()},{end.isoformat()},640,qfq",
                 })
             except Exception as e:
                 logger.warning("eastmoney 日线获取失败 %s: %s", code, e)
                 raise ProviderError(self.name, f"日线获取失败 {code}: {e}", retriable=True) from e
 
-            # 腾讯结构:data -> {bare_code: {qfqday: [[...], ...]}} 或 {day: [[...]]}
-            data_node = payload.get("data") or {}
-            bare = bare_code(code)
-            code_node = data_node.get(bare) or {}
-            klines = code_node.get("qfqday") or code_node.get("day") or []
+            # 腾讯结构:data -> {symbol: {qfqday: [[...], ...]}} 或 {day: [[...]]}
+            klines = self._extract_klines(payload, symbol, code)
 
             for line in klines:
                 # klines 元素可能是字符串(逗号分隔)或 list(腾讯返回 list of lists)
                 if isinstance(line, list):
                     line = ",".join(str(x) for x in line)
+                elif not isinstance(line, str):
+                    raise ProviderError(
+                        self.name,
+                        f"腾讯 K 线协议错误 {code}: K 线行不是字符串或数组",
+                    )
                 bar = self._parse_kline_line(code, line)
                 if bar and start <= bar.trade_date <= end:
                     results.append(bar)
@@ -117,18 +165,17 @@ class EastmoneyProvider:
 
     def get_index_bars(self, codes: list[str], start: date, end: date) -> list[DailyBar]:
         """指数 K 线(沪深300/中证500)。接口与股票一致,secid 前缀 1。"""
-        # 指数代码已是 .SH 形式,直接复用 get_daily_bars 逻辑
-        return self.get_daily_bars(codes, start, end)
+        normalized_codes = [
+            normalize_stock_code(code, kind="index") for code in codes
+        ]
+        return self.get_daily_bars(normalized_codes, start, end)
 
     def get_trade_calendar(self, start: date, end: date) -> list[TradeDay]:
-        """Phase 1 暂返回基于周末的日历,真实节假日由 akshare 提供。"""
-        days: list[TradeDay] = []
-        cur = start
-        while cur <= end:
-            is_open = cur.weekday() < 5
-            days.append(TradeDay(date=cur, is_open=is_open, exchange="SSE"))
-            cur += timedelta(days=1)
-        return days
+        raise ProviderError(
+            self.name,
+            "该 Provider 不提供可信节假日交易日历",
+            retriable=False,
+        )
 
     def get_instrument_status(self, codes: list[str], trade_date: date) -> list[InstrumentStatus]:
         # Phase 1 暂返回默认状态(未停牌);Phase 2 接入实时停牌接口

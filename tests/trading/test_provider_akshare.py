@@ -3,7 +3,7 @@ import pytest
 
 from backend.trading.providers.akshare_provider import AkshareProvider
 from backend.trading.providers.base import ProviderError
-from tests.trading.test_provider_contract import ProviderContractTest, load_fixture
+from tests.trading.test_provider_contract import ProviderContractTest
 
 
 def _make_daily_df(symbol=None, start_date=None, end_date=None):
@@ -113,3 +113,56 @@ def test_get_daily_bars_skips_invalid_ohlc():
     provider._ak = BadRowAk()
     bars = provider.get_daily_bars(["000001.SZ"], date(2026, 7, 14), date(2026, 7, 16))
     assert bars == []
+
+
+def test_akshare_calendar_failure_does_not_fallback_to_weekdays():
+    provider = AkshareProvider()
+
+    class BrokenAk:
+        @staticmethod
+        def tool_trade_date_hist_sina():
+            raise RuntimeError("calendar offline")
+
+    provider._ak = BrokenAk()
+    with pytest.raises(ProviderError) as exc:
+        provider.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 1))
+    assert exc.value.retriable is True
+
+
+def test_akshare_calendar_requires_installed_provider(monkeypatch):
+    provider = AkshareProvider()
+    monkeypatch.setattr(provider, "_ak", None)
+
+    with pytest.raises(ProviderError) as exc:
+        provider.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 1))
+    assert exc.value.retriable is False
+
+
+def test_akshare_empty_calendar_fails_closed():
+    provider = AkshareProvider()
+
+    class EmptyCalendarAk:
+        @staticmethod
+        def tool_trade_date_hist_sina():
+            return _make_empty_df()
+
+    provider._ak = EmptyCalendarAk()
+    with pytest.raises(ProviderError, match="交易日历"):
+        provider.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 2))
+
+
+def test_akshare_calendar_must_cover_requested_horizon():
+    provider = AkshareProvider()
+
+    class StaleCalendarAk:
+        @staticmethod
+        def tool_trade_date_hist_sina():
+            class FakeDF:
+                def iterrows(self):
+                    yield 0, {"trade_date": "2026-09-30"}
+
+            return FakeDF()
+
+    provider._ak = StaleCalendarAk()
+    with pytest.raises(ProviderError, match="交易日历"):
+        provider.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 2))

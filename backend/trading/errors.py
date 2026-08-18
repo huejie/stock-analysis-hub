@@ -49,6 +49,21 @@ class ProviderUnavailableError(TradingError):
     http_status = 503
 
 
+class ProviderConfigInvalidError(TradingError):
+    code = "PROVIDER_CONFIG_INVALID"
+    http_status = 500
+
+
+class EmptyProviderResultError(TradingError):
+    code = "EMPTY_PROVIDER_RESULT"
+    http_status = 503
+
+
+class CalendarUnavailableError(TradingError):
+    code = "CALENDAR_UNAVAILABLE"
+    http_status = 503
+
+
 class InvalidTradeDateError(TradingError):
     code = "INVALID_TRADE_DATE"
     http_status = 422
@@ -59,6 +74,21 @@ class PlanBlockedError(TradingError):
     http_status = 409
 
 
+class PlanInProgressError(TradingError):
+    code = "PLAN_IN_PROGRESS"
+    http_status = 202
+
+
+class PlanGenerationFailedError(TradingError):
+    code = "PLAN_GENERATION_FAILED"
+    http_status = 500
+
+
+class PlanSupersededError(TradingError):
+    code = "PLAN_SUPERSEDED"
+    http_status = 409
+
+
 class StrategyNotActiveError(TradingError):
     code = "STRATEGY_NOT_ACTIVE"
     http_status = 422
@@ -66,6 +96,11 @@ class StrategyNotActiveError(TradingError):
 
 class PlanAlreadyPublishedError(TradingError):
     code = "PLAN_ALREADY_PUBLISHED"
+    http_status = 409
+
+
+class ExecutionIdempotencyConflictError(TradingError):
+    code = "EXECUTION_IDEMPOTENCY_CONFLICT"
     http_status = 409
 
 

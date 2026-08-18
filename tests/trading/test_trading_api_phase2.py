@@ -124,6 +124,88 @@ async def test_execution_idempotent():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "different_value"),
+    [
+        ("account_id", "other-account"),
+        ("stock_code", "600000.SH"),
+        ("side", "SELL"),
+        ("trade_date", "2026-07-23"),
+        ("price", 10.5),
+        ("quantity", 1100),
+    ],
+)
+async def test_execution_idempotency_conflict_returns_409_without_state_change(
+    field, different_value
+):
+    import backend.trading.router as router_mod
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first_account = await client.post(
+            "/api/trading/accounts",
+            json={
+                "name": "main",
+                "initial_equity": 100000,
+                "cash_balance": 100000,
+            },
+        )
+        other_account = await client.post(
+            "/api/trading/accounts",
+            json={
+                "name": "secondary",
+                "initial_equity": 50000,
+                "cash_balance": 50000,
+                "is_active": False,
+            },
+        )
+        account_id = first_account.json()["id"]
+        body = {
+            "account_id": account_id,
+            "stock_code": "000001.SZ",
+            "side": "BUY",
+            "trade_date": "2026-07-22",
+            "price": 10.0,
+            "quantity": 1000,
+            "commission": 0,
+            "tax": 0,
+            "client_execution_id": "api-payload-bound",
+        }
+        created = await client.post("/api/trading/executions", json=body)
+        before_account = router_mod.trading_repo.get_account(account_id)
+        before_other = router_mod.trading_repo.get_account(
+            other_account.json()["id"]
+        )
+        before_position = router_mod.trading_repo.get_position(
+            account_id, "000001.SZ"
+        )
+        replay = dict(body)
+        replay[field] = (
+            other_account.json()["id"]
+            if different_value == "other-account"
+            else different_value
+        )
+
+        response = await client.post("/api/trading/executions", json=replay)
+
+    assert created.status_code == 200
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "EXECUTION_IDEMPOTENCY_CONFLICT"
+    assert field in response.json()["detail"]["details"]["conflicting_fields"]
+    assert router_mod.trading_repo.get_account(account_id) == before_account
+    assert (
+        router_mod.trading_repo.get_account(other_account.json()["id"])
+        == before_other
+    )
+    assert (
+        router_mod.trading_repo.get_position(account_id, "000001.SZ")
+        == before_position
+    )
+    assert len(router_mod.trading_repo.list_executions(account_id)) == 1
+
+
+@pytest.mark.asyncio
 async def test_get_positions():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r1 = await ac.post("/api/trading/accounts", json={"name": "main", "initial_equity": 100000, "cash_balance": 100000})

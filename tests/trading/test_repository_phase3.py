@@ -1,4 +1,6 @@
 import os
+from threading import Barrier, Thread
+
 import pytest
 from backend.trading.repository import TradingRepository
 from backend.trading.migrations import run_migrations
@@ -159,6 +161,78 @@ def test_create_plan_run_idempotent_on_run_key(repo):
     assert r2["reused"] is True
 
 
+class _PlanCreateRaceConnection:
+    """Force the legacy SELECT/INSERT gap without delaying atomic code."""
+
+    def __init__(self, inner, select_barrier):
+        self._inner = inner
+        self._select_barrier = select_barrier
+        self._atomic = False
+
+    def execute(self, sql, params=()):
+        if sql.strip().upper() == "BEGIN IMMEDIATE":
+            self._atomic = True
+        cursor = self._inner.execute(sql, params)
+        if (
+            not self._atomic
+            and "SELECT id FROM trade_plan_runs WHERE run_key" in sql
+        ):
+            self._select_barrier.wait(timeout=3)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_create_plan_run_concurrent_callers_have_one_owner(repo, monkeypatch):
+    account = _make_account(repo)
+    barrier = Barrier(2)
+    repo_a = TradingRepository(TEST_DB)
+    repo_b = TradingRepository(TEST_DB)
+
+    for instance in (repo_a, repo_b):
+        original_conn = instance._conn
+        monkeypatch.setattr(
+            instance,
+            "_conn",
+            lambda original_conn=original_conn: _PlanCreateRaceConnection(
+                original_conn(), barrier
+            ),
+        )
+
+    kwargs = dict(
+        run_key="rk-concurrent",
+        account_id=account["id"],
+        signal_date="2026-07-22",
+        target_trade_date="2026-07-23",
+        stock_pool_version_id=1,
+        strategy_version_id=1,
+        status="CREATED",
+        account_snapshot_json={"cash": 100000},
+        data_snapshot_hash="snap-concurrent",
+    )
+    results = []
+    errors = []
+
+    def create(instance):
+        try:
+            results.append(instance.create_plan_run(**kwargs))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [Thread(target=create, args=(instance,)) for instance in (repo_a, repo_b)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(results) == 2
+    assert {result["id"] for result in results} == {results[0]["id"]}
+    assert sorted(result["reused"] for result in results) == [False, True]
+
+
 def test_get_plan_run(repo):
     acc = _make_account(repo)
     created = repo.create_plan_run(
@@ -189,21 +263,31 @@ def test_get_plan_run_by_key(repo):
 
 def test_list_plan_runs_filters(repo):
     acc = _make_account(repo)
-    repo.create_plan_run(
+    other = repo.create_account(
+        name="secondary", initial_equity=50000, cash_balance=50000,
+        is_active=False,
+    )
+    first = repo.create_plan_run(
         run_key="rk-1", account_id=acc["id"], signal_date="2026-07-22",
         target_trade_date="2026-07-23", stock_pool_version_id=1,
         strategy_version_id=1, status="READY",
         account_snapshot_json={"cash": 100000}, data_snapshot_hash="s1",
     )
-    repo.create_plan_run(
-        run_key="rk-2", account_id=acc["id"], signal_date="2026-07-23",
+    second = repo.create_plan_run(
+        run_key="rk-2", account_id=other["id"], signal_date="2026-07-23",
         target_trade_date="2026-07-24", stock_pool_version_id=1,
         strategy_version_id=1, status="BLOCKED",
-        account_snapshot_json={"cash": 100000}, data_snapshot_hash="s2",
+        account_snapshot_json={"cash": 50000}, data_snapshot_hash="s2",
     )
     assert len(repo.list_plan_runs(signal_date="2026-07-22")) == 1
     assert len(repo.list_plan_runs(status="BLOCKED")) == 1
     assert len(repo.list_plan_runs()) == 2
+    assert [row["id"] for row in repo.list_plan_runs(account_id=acc["id"])] == [
+        first["id"]
+    ]
+    assert [
+        row["id"] for row in repo.list_plan_runs(account_id=other["id"])
+    ] == [second["id"]]
 
 
 def test_update_plan_run_status(repo):

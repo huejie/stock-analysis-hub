@@ -136,29 +136,34 @@ class AkshareProvider:
     def get_trade_calendar(self, start: date, end: date) -> list[TradeDay]:
         ak = self._ensure_ak()
         if ak is None:
-            # 降级:基于周末
-            return self._weekend_calendar(start, end)
+            raise ProviderError(
+                self.name, "akshare 未安装，无法获取交易日历", retriable=False
+            )
         try:
             df = ak.tool_trade_date_hist_sina()
-            open_dates = {str(r["trade_date"])[:10] for _, r in df.iterrows()}
-        except Exception as e:
-            logger.warning("akshare 交易日历获取失败,降级周末判断: %s", e)
-            return self._weekend_calendar(start, end)
+            open_dates = {
+                date.fromisoformat(str(row["trade_date"])[:10])
+                for _, row in df.iterrows()
+            }
+            if not open_dates:
+                raise ValueError("交易日历返回空结果")
+            if min(open_dates) > start or max(open_dates) < end:
+                raise ValueError("交易日历未覆盖请求日期范围")
+        except Exception as exc:
+            raise ProviderError(
+                self.name, f"交易日历获取失败: {exc}", retriable=True
+            ) from exc
         days = []
-        cur = start
-        while cur <= end:
-            is_open = cur.isoformat() in open_dates
-            days.append(TradeDay(date=cur, is_open=is_open, exchange="SSE"))
-            cur += timedelta(days=1)
-        return days
-
-    @staticmethod
-    def _weekend_calendar(start: date, end: date) -> list[TradeDay]:
-        days = []
-        cur = start
-        while cur <= end:
-            days.append(TradeDay(date=cur, is_open=cur.weekday() < 5, exchange="SSE"))
-            cur += timedelta(days=1)
+        current = start
+        while current <= end:
+            days.append(
+                TradeDay(
+                    date=current,
+                    is_open=current in open_dates,
+                    exchange="SSE",
+                )
+            )
+            current += timedelta(days=1)
         return days
 
     def get_instrument_status(self, codes: list[str], trade_date: date) -> list[InstrumentStatus]:

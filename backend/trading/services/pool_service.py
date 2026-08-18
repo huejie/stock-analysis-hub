@@ -24,7 +24,20 @@ class PoolService:
         return self.import_from_text(pool_name, csv_body, source="csv")
 
     def get_version(self, version_id: int) -> dict | None:
-        return self.repo.get_stock_pool_version(version_id)
+        version = self.repo.get_stock_pool_version(version_id)
+        if version is None:
+            return None
+        status = next(
+            (
+                row for row in self.repo.list_stock_pool_versions()
+                if row["id"] == version_id
+            ),
+            None,
+        )
+        if status is not None:
+            version["is_usable"] = bool(status["is_usable"])
+            version["invalid_reason"] = status["invalid_reason"]
+        return version
 
     def list_versions(self, pool_name: str | None = None) -> list[dict]:
         return self.repo.list_stock_pool_versions(pool_name)
@@ -45,7 +58,7 @@ class PoolService:
         items = []
         for t in top:
             try:
-                code = normalize_stock_code(t["stock_code"])
+                code = normalize_stock_code(t["stock_code"], kind="stock")
             except ValueError:
                 continue
             items.append({"stock_code": code, "stock_name": t["stock_name"]})

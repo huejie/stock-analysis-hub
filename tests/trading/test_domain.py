@@ -11,11 +11,24 @@ from backend.trading.domain import normalize_stock_code, bare_code, market_prefi
     ("sh600000", "600000.SH"),
     ("300750", "300750.SZ"),
     ("688981", "688981.SH"),
-    ("000300", "000300.SH"),   # 沪深300 指数
-    ("000905", "000905.SH"),   # 中证500 指数
+    ("000300.SH", "000300.SH"),
+    ("000905.SH", "000905.SH"),
 ])
 def test_normalize_stock_code(raw, expected):
     assert normalize_stock_code(raw) == expected
+
+
+def test_bare_0009_stock_is_shenzhen():
+    assert normalize_stock_code("000936") == "000936.SZ"
+
+
+def test_known_bare_index_requires_index_context():
+    assert normalize_stock_code("000905", kind="index") == "000905.SH"
+    assert normalize_stock_code("000905", kind="stock") == "000905.SZ"
+
+
+def test_explicit_market_is_preserved():
+    assert normalize_stock_code("000905.SH", kind="index") == "000905.SH"
 
 
 def test_bare_code():

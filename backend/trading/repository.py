@@ -12,11 +12,24 @@ Windows 注意:sqlite3.Connection 的 __exit__ 只 commit 不 close。
 import hashlib
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-from .domain import DailyBar
+from .domain import DailyBar, TradeDay
+from .errors import ExecutionIdempotencyConflictError
 from .migrations import _set_pragmas
+
+
+def _db_timestamp(value: datetime) -> str:
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat(sep=" ", timespec="seconds")
+
+
+def _db_lease_timestamp(value: datetime) -> str:
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat(sep=" ", timespec="microseconds")
 
 
 class TradingRepository:
@@ -33,16 +46,33 @@ class TradingRepository:
     # ---- 股票池 ----
 
     @staticmethod
-    def _items_hash(items: list[dict]) -> str:
-        """对 items 计算稳定哈希(键排序 + 小写化代码)。"""
-        canonical = sorted(
+    def _canonical_pool_items(items: list[dict]) -> list[dict]:
+        return sorted(
             [{"stock_code": it["stock_code"].upper(),
               "stock_name": (it.get("stock_name") or "").strip()}
              for it in items],
             key=lambda x: x["stock_code"],
         )
+
+    @classmethod
+    def _items_hash(cls, items: list[dict]) -> str:
+        """对 items 计算稳定哈希(键排序 + 大写化代码)。"""
+        canonical = cls._canonical_pool_items(items)
         return hashlib.sha256(
             json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+    @classmethod
+    def _symbol_repair_hash(
+        cls, items: list[dict], old_version_id: int
+    ) -> str:
+        """修复身份包含来源旧版本，避免复用同内容的历史版本。"""
+        identity = {
+            "items": cls._canonical_pool_items(items),
+            "old_version_id": old_version_id,
+        }
+        return hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()
         ).hexdigest()[:16]
 
     def create_stock_pool_version(self, pool_name: str, items: list[dict],
@@ -112,29 +142,164 @@ class TradingRepository:
                 "id": ver["id"], "pool_name": ver["pool_name"],
                 "version_no": ver["version_no"], "items_hash": ver["items_hash"],
                 "source": ver["source"], "created_at": ver["created_at"],
+                "is_usable": bool(ver["is_usable"]),
+                "invalid_reason": ver["invalid_reason"],
                 "items": [dict(it) for it in items],
             }
         finally:
             conn.close()
 
-    def list_stock_pool_versions(self, pool_name: str | None = None) -> list[dict]:
+    def apply_symbol_repair_batch(self, repairs: list[dict]) -> list[dict]:
+        """在单一事务中创建全部修复版本、封存旧版本并记录阻断问题。"""
+        if not repairs:
+            return []
         conn = self._conn()
         try:
-            if pool_name:
-                rows = conn.execute(
-                    "SELECT v.id, v.pool_name, v.version_no, v.source, v.created_at, "
-                    "       (SELECT COUNT(*) FROM trade_stock_pool_items i WHERE i.pool_version_id = v.id) AS items_count "
-                    "FROM trade_stock_pool_versions v WHERE v.pool_name = ? "
-                    "ORDER BY v.version_no DESC",
+            conn.execute("BEGIN IMMEDIATE")
+            prepared = []
+            for repair in repairs:
+                old_version_id = int(repair["old_version_id"])
+                old = conn.execute(
+                    "SELECT id, pool_name, version_no, is_usable "
+                    "FROM trade_stock_pool_versions WHERE id=?",
+                    (old_version_id,),
+                ).fetchone()
+                if old is None:
+                    raise ValueError(f"股票池版本 {old_version_id} 不存在")
+                if not old["is_usable"]:
+                    raise RuntimeError(f"股票池版本 {old_version_id} 已失效")
+                corrected_items = repair["corrected_items"]
+                if not corrected_items:
+                    raise ValueError("修复后的股票池不能为空")
+                prepared.append((old, repair, corrected_items))
+
+            # 同一池内按历史版本从老到新生成，保证最新污染源的修复成为当前版本。
+            prepared.sort(
+                key=lambda entry: (entry[0]["version_no"], entry[0]["id"])
+            )
+            results = []
+            for old, repair, corrected_items in prepared:
+                pool_name = old["pool_name"]
+                old_version_id = old["id"]
+                items_hash = self._symbol_repair_hash(
+                    corrected_items, old_version_id
+                )
+                existing = conn.execute(
+                    "SELECT id FROM trade_stock_pool_versions "
+                    "WHERE pool_name=? AND items_hash=?",
+                    (pool_name, items_hash),
+                ).fetchone()
+                if existing is not None:
+                    raise RuntimeError(
+                        f"股票池版本 {old_version_id} 已存在对应修复版本"
+                    )
+                max_version = conn.execute(
+                    "SELECT MAX(version_no) AS m FROM trade_stock_pool_versions "
+                    "WHERE pool_name=?",
                     (pool_name,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT v.id, v.pool_name, v.version_no, v.source, v.created_at, "
-                    "       (SELECT COUNT(*) FROM trade_stock_pool_items i WHERE i.pool_version_id = v.id) AS items_count "
-                    "FROM trade_stock_pool_versions v ORDER BY v.version_no DESC",
-                ).fetchall()
+                ).fetchone()
+                next_version = (max_version["m"] or 0) + 1
+                inserted = conn.execute(
+                    "INSERT INTO trade_stock_pool_versions "
+                    "(pool_name, version_no, items_hash, source) "
+                    "VALUES (?, ?, ?, 'symbol_repair')",
+                    (pool_name, next_version, items_hash),
+                )
+                new_version_id = inserted.lastrowid
+                conn.executemany(
+                    "INSERT INTO trade_stock_pool_items "
+                    "(pool_version_id, stock_code, stock_name, sector_name, "
+                    " manual_blacklist, note) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            new_version_id,
+                            item["stock_code"],
+                            item.get("stock_name"),
+                            item.get("sector_name"),
+                            int(bool(item.get("manual_blacklist", 0))),
+                            item.get("note", ""),
+                        )
+                        for item in corrected_items
+                    ],
+                )
+                invalidated = conn.execute(
+                    "UPDATE trade_stock_pool_versions "
+                    "SET is_usable=0, invalid_reason='SYMBOL_MARKET_MISMATCH' "
+                    "WHERE id=? AND is_usable=1",
+                    (old_version_id,),
+                )
+                if invalidated.rowcount != 1:
+                    raise RuntimeError(
+                        f"股票池版本 {old_version_id} 失效标记失败"
+                    )
+                details = {
+                    "old_version_id": old_version_id,
+                    "new_version_id": new_version_id,
+                }
+                conn.execute(
+                    "INSERT INTO trade_data_issues "
+                    "(severity, issue_code, message, source, details_json) "
+                    "VALUES ('BLOCKING', 'SYMBOL_MARKET_MISMATCH', ?, "
+                    "        'data_repair', ?)",
+                    (
+                        repair["message"],
+                        json.dumps(details, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+                results.append({
+                    **details,
+                    "version_no": next_version,
+                    "items_hash": items_hash,
+                    "source": "symbol_repair",
+                })
+            conn.commit()
+            return results
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_stock_pool_versions(
+        self,
+        pool_name: str | None = None,
+        *,
+        usable_only: bool = False,
+    ) -> list[dict]:
+        clauses = []
+        params: list = []
+        if pool_name:
+            clauses.append("v.pool_name = ?")
+            params.append(pool_name)
+        if usable_only:
+            clauses.append("v.is_usable = 1")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT v.id, v.pool_name, v.version_no, v.source, v.created_at, "
+                "       v.is_usable, v.invalid_reason, "
+                "       (SELECT COUNT(*) FROM trade_stock_pool_items i "
+                "        WHERE i.pool_version_id = v.id) AS items_count "
+                f"FROM trade_stock_pool_versions v{where} "
+                "ORDER BY v.version_no DESC",
+                params,
+            ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def mark_stock_pool_unusable(self, version_id: int, reason: str) -> bool:
+        conn = self._conn()
+        try:
+            updated = conn.execute(
+                "UPDATE trade_stock_pool_versions "
+                "SET is_usable=0, invalid_reason=? "
+                "WHERE id=? AND is_usable=1",
+                (reason, version_id),
+            )
+            conn.commit()
+            return updated.rowcount == 1
         finally:
             conn.close()
 
@@ -290,26 +455,691 @@ class TradingRepository:
         finally:
             conn.close()
 
-    # ---- 任务(Phase 1 仅最小实现,供数据更新使用) ----
+    # ---- 任务 ----
+
+    @staticmethod
+    def _decode_job_row(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        job = dict(row)
+        for source, target, fallback in (
+            ("request_json", "request", {}),
+            ("result_json", "result", None),
+            ("error_json", "error", None),
+        ):
+            raw = job.pop(source, None)
+            try:
+                job[target] = json.loads(raw) if raw else fallback
+            except ValueError:
+                job[target] = fallback
+        return job
 
     def create_job(self, job_type: str, job_key: str, request: dict) -> int:
         conn = self._conn()
         try:
-            # 幂等:同 job_key 已存在且未完成则复用
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT id, status FROM trade_jobs WHERE job_key = ? "
-                "ORDER BY id DESC LIMIT 1",
-                (job_key,),
+                "SELECT id FROM trade_jobs WHERE job_key = ?", (job_key,)
             ).fetchone()
-            if existing and existing["status"] in ("QUEUED", "RUNNING"):
+            if existing:
+                conn.commit()
                 return existing["id"]
-            cur = conn.execute(
-                "INSERT INTO trade_jobs (job_type, job_key, status, request_json) "
+            cursor = conn.execute(
+                "INSERT INTO trade_jobs "
+                "(job_type, job_key, status, request_json) "
                 "VALUES (?, ?, 'QUEUED', ?)",
                 (job_type, job_key, json.dumps(request, ensure_ascii=False)),
             )
             conn.commit()
-            return cur.lastrowid
+            return cursor.lastrowid
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ---- 交易日历 ----
+
+    def upsert_trade_calendar(
+        self, days: list[TradeDay], *, source: str
+    ) -> int:
+        if not days:
+            return 0
+        rows = [
+            (day.date.isoformat(), day.exchange, int(day.is_open), source)
+            for day in days
+        ]
+        conn = self._conn()
+        try:
+            conn.executemany(
+                "INSERT INTO trade_calendar "
+                "(trade_date, exchange, is_open, source) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(trade_date, exchange) DO UPDATE SET "
+                "is_open=excluded.is_open, source=excluded.source, "
+                "fetched_at=datetime('now')",
+                rows,
+            )
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
+
+    def get_trade_day(
+        self, trade_date: date, exchange: str = "SSE"
+    ) -> TradeDay | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT trade_date, exchange, is_open FROM trade_calendar "
+                "WHERE trade_date=? AND exchange=?",
+                (trade_date.isoformat(), exchange),
+            ).fetchone()
+            if row is None:
+                return None
+            return TradeDay(
+                date=date.fromisoformat(row["trade_date"]),
+                is_open=bool(row["is_open"]),
+                exchange=row["exchange"],
+            )
+        finally:
+            conn.close()
+
+    def get_job_by_key(self, job_key: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM trade_jobs WHERE job_key = ?", (job_key,)
+            ).fetchone()
+            return self._decode_job_row(row)
+        finally:
+            conn.close()
+
+    def claim_next_job(
+        self,
+        *,
+        owner_id: str,
+        now: datetime,
+        max_attempts: int = 3,
+    ) -> dict | None:
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id, error_json FROM trade_jobs "
+                "WHERE status = 'QUEUED' AND attempts < ? "
+                "ORDER BY created_at, id LIMIT 1",
+                (max_attempts,),
+            ).fetchone()
+            if row is None:
+                conn.commit()
+                return None
+            updated = conn.execute(
+                "UPDATE trade_jobs SET status='RUNNING', "
+                "attempts=attempts+1, progress=0, started_at=?, "
+                "finished_at=NULL, error_json=NULL "
+                "WHERE id=? AND status='QUEUED'",
+                (_db_timestamp(now), row["id"]),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM trade_jobs WHERE id=?", (row["id"],)
+            ).fetchone()
+            conn.commit()
+            result = self._decode_job_row(claimed)
+            result["claimed_by"] = owner_id
+            try:
+                result["previous_error"] = json.loads(
+                    row["error_json"] or "null"
+                )
+            except (TypeError, ValueError):
+                result["previous_error"] = None
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_job(
+        self,
+        job_id: int,
+        *,
+        result: dict,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+    ) -> None:
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE trade_jobs SET status='SUCCEEDED', progress=1, "
+                "result_json=?, error_json=NULL, finished_at=datetime('now') "
+                "WHERE id=? AND status='RUNNING' AND attempts=? "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ?"
+                ")",
+                (
+                    json.dumps(result, ensure_ascii=False),
+                    job_id,
+                    expected_attempt,
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError(
+                    f"任务 {job_id} 没有当前 worker 的有效 execution lease"
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def retry_or_fail_job(
+        self,
+        job_id: int,
+        *,
+        error: dict,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+        max_attempts: int = 3,
+    ) -> str:
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempts FROM trade_jobs "
+                "WHERE id=? AND status='RUNNING' AND attempts=? "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ?"
+                ")",
+                (
+                    job_id,
+                    expected_attempt,
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"任务 {job_id} 没有当前 worker 的有效 execution lease"
+                )
+            status = "FAILED" if row["attempts"] >= max_attempts else "QUEUED"
+            finished_sql = "datetime('now')" if status == "FAILED" else "NULL"
+            updated = conn.execute(
+                f"UPDATE trade_jobs SET status=?, progress=0, error_json=?, "
+                f"finished_at={finished_sql}, "
+                "started_at=CASE WHEN ?='QUEUED' THEN NULL ELSE started_at END "
+                "WHERE id=? AND status='RUNNING' AND attempts=? "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ?"
+                ")",
+                (
+                    status,
+                    json.dumps(error, ensure_ascii=False),
+                    status,
+                    job_id,
+                    expected_attempt,
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError(
+                    f"任务 {job_id} 没有当前 worker 的有效 execution lease"
+                )
+            conn.commit()
+            return status
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def requeue_stale_jobs(
+        self, *, stale_before: datetime, now: datetime
+    ) -> int:
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT j.id, j.attempts FROM trade_jobs j "
+                "WHERE j.status='RUNNING' "
+                "AND (j.started_at < ? OR ("
+                "j.job_type='generate_daily_plan' "
+                "AND json_extract(j.error_json, '$.code')='PLAN_IN_PROGRESS'"
+                ")) "
+                "AND NOT (j.job_type='generate_daily_plan' "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_plan_runs p "
+                "JOIN trade_job_locks pl "
+                "ON pl.lock_key='plan-generation:' || p.id "
+                "WHERE p.signal_date=json_extract(j.request_json, '$.trade_date') "
+                "AND p.status IN ('CREATED','VALIDATING','GENERATING') "
+                "AND pl.expires_at > ?"
+                ")) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM trade_job_locks l "
+                "WHERE l.lock_key = "
+                "'job-execution:' || j.id || ':' || j.attempts "
+                "AND l.expires_at > ?"
+                ")",
+                (
+                    _db_timestamp(stale_before),
+                    _db_lease_timestamp(now),
+                    _db_lease_timestamp(now),
+                ),
+            ).fetchall()
+            for row in rows:
+                if row["attempts"] >= 3:
+                    error = json.dumps(
+                        {
+                            "code": "JOB_MAX_ATTEMPTS",
+                            "message": "陈旧 RUNNING 任务已达到最大尝试次数",
+                        },
+                        ensure_ascii=False,
+                    )
+                    conn.execute(
+                        "UPDATE trade_jobs SET status='FAILED', error_json=?, "
+                        "finished_at=datetime('now') WHERE id=?",
+                        (error, row["id"]),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE trade_jobs SET status='QUEUED', started_at=NULL "
+                        "WHERE id=?",
+                        (row["id"],),
+                    )
+                conn.execute(
+                    "DELETE FROM trade_job_locks WHERE lock_key=?",
+                    (self._execution_lease_key(row["id"], row["attempts"]),),
+                )
+            conn.commit()
+            return len(rows)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _execution_lease_key(job_id: int, expected_attempt: int) -> str:
+        return f"job-execution:{job_id}:{expected_attempt}"
+
+    @staticmethod
+    def _plan_generation_lease_key(run_id: int) -> str:
+        return f"plan-generation:{run_id}"
+
+    def wait_for_plan_generation(
+        self,
+        job_id: int,
+        *,
+        error: dict,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+    ) -> bool:
+        """Keep a plan job RUNNING while another live plan owner works.
+
+        The execution lease is still required for this write, but is released
+        by the caller afterwards. ``requeue_stale_jobs`` will make the job
+        eligible again only once the observed plan-generation lease expires.
+        """
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE trade_jobs SET progress=0, result_json=NULL, error_json=? "
+                "WHERE id=? AND status='RUNNING' AND attempts=? "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ?"
+                ")",
+                (
+                    json.dumps(error, ensure_ascii=False),
+                    job_id,
+                    expected_attempt,
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                ),
+            )
+            conn.commit()
+            return updated.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def acquire_plan_generation_lease(
+        self,
+        run_id: int,
+        *,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        """Claim an in-progress plan only when no live owner already exists."""
+        lock_key = self._plan_generation_lease_key(run_id)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT 1 FROM trade_plan_runs WHERE id=? "
+                "AND status IN ('CREATED','VALIDATING','GENERATING')",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                conn.commit()
+                return False
+            conn.execute(
+                "DELETE FROM trade_job_locks WHERE lock_key=? AND expires_at <= ?",
+                (lock_key, _db_lease_timestamp(now)),
+            )
+            acquired = conn.execute(
+                "INSERT INTO trade_job_locks "
+                "(lock_key, owner_id, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
+                (
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                    _db_lease_timestamp(expires_at),
+                ),
+            )
+            conn.commit()
+            return acquired.rowcount == 1
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return False
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def renew_plan_generation_lease(
+        self,
+        run_id: int,
+        *,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        lock_key = self._plan_generation_lease_key(run_id)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            renewed = conn.execute(
+                "UPDATE trade_job_locks SET expires_at=? "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ? "
+                "AND EXISTS (SELECT 1 FROM trade_plan_runs WHERE id=? "
+                "AND status IN ('CREATED','VALIDATING','GENERATING'))",
+                (
+                    _db_lease_timestamp(expires_at),
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                    run_id,
+                ),
+            )
+            conn.commit()
+            return renewed.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_plan_generation_lease(
+        self, run_id: int, *, owner_id: str
+    ) -> bool:
+        conn = self._conn()
+        try:
+            released = conn.execute(
+                "DELETE FROM trade_job_locks WHERE lock_key=? AND owner_id=?",
+                (self._plan_generation_lease_key(run_id), owner_id),
+            )
+            conn.commit()
+            return released.rowcount == 1
+        finally:
+            conn.close()
+
+    def acquire_job_execution_lease(
+        self,
+        job_id: int,
+        *,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+        expires_at: datetime,
+    ) -> dict | None:
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            job = conn.execute(
+                "SELECT * FROM trade_jobs "
+                "WHERE id=? AND status='RUNNING' AND attempts=?",
+                (job_id, expected_attempt),
+            ).fetchone()
+            if job is None:
+                conn.commit()
+                return None
+            acquired = conn.execute(
+                "INSERT INTO trade_job_locks "
+                "(lock_key, owner_id, acquired_at, expires_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(lock_key) DO NOTHING",
+                (
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                    _db_lease_timestamp(expires_at),
+                ),
+            )
+            if acquired.rowcount != 1:
+                conn.commit()
+                return None
+            conn.commit()
+            return self._decode_job_row(job)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def renew_job_execution_lease(
+        self,
+        job_id: int,
+        *,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            renewed = conn.execute(
+                "UPDATE trade_job_locks SET expires_at=? "
+                "WHERE lock_key=? AND owner_id=? AND expires_at > ? "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_jobs "
+                "WHERE id=? AND status='RUNNING' AND attempts=?"
+                ")",
+                (
+                    _db_lease_timestamp(expires_at),
+                    lock_key,
+                    owner_id,
+                    _db_lease_timestamp(now),
+                    job_id,
+                    expected_attempt,
+                ),
+            )
+            if renewed.rowcount == 1:
+                liveness = conn.execute(
+                    "UPDATE trade_jobs SET started_at=? "
+                    "WHERE id=? AND status='RUNNING' AND attempts=?",
+                    (
+                        _db_timestamp(now),
+                        job_id,
+                        expected_attempt,
+                    ),
+                )
+                if liveness.rowcount != 1:
+                    conn.rollback()
+                    return False
+            conn.commit()
+            return renewed.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def renew_or_reacquire_job_execution_lease(
+        self,
+        job_id: int,
+        *,
+        owner_id: str,
+        expected_attempt: int,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        """Atomically restore a lease only for the same live execution."""
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            job = conn.execute(
+                "SELECT 1 FROM trade_jobs "
+                "WHERE id=? AND status='RUNNING' AND attempts=?",
+                (job_id, expected_attempt),
+            ).fetchone()
+            if job is None:
+                conn.commit()
+                return False
+            lease = conn.execute(
+                "SELECT owner_id FROM trade_job_locks WHERE lock_key=?",
+                (lock_key,),
+            ).fetchone()
+            if lease is None or lease["owner_id"] != owner_id:
+                conn.commit()
+                return False
+            restored = conn.execute(
+                "UPDATE trade_job_locks "
+                "SET acquired_at=?, expires_at=? "
+                "WHERE lock_key=? AND owner_id=?",
+                (
+                    _db_lease_timestamp(now),
+                    _db_lease_timestamp(expires_at),
+                    lock_key,
+                    owner_id,
+                ),
+            )
+            if restored.rowcount != 1:
+                conn.commit()
+                return False
+            liveness = conn.execute(
+                "UPDATE trade_jobs SET started_at=? "
+                "WHERE id=? AND status='RUNNING' AND attempts=?",
+                (_db_timestamp(now), job_id, expected_attempt),
+            )
+            if liveness.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_job_execution_lease(
+        self,
+        job_id: int,
+        *,
+        owner_id: str,
+        expected_attempt: int,
+    ) -> bool:
+        lock_key = self._execution_lease_key(job_id, expected_attempt)
+        conn = self._conn()
+        try:
+            released = conn.execute(
+                "DELETE FROM trade_job_locks "
+                "WHERE lock_key=? AND owner_id=?",
+                (lock_key, owner_id),
+            )
+            conn.commit()
+            return released.rowcount == 1
+        finally:
+            conn.close()
+
+    def acquire_job_lock(
+        self,
+        *,
+        lock_key: str,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM trade_job_locks "
+                "WHERE lock_key=? AND expires_at <= ?",
+                (lock_key, _db_timestamp(now)),
+            )
+            cursor = conn.execute(
+                "INSERT INTO trade_job_locks "
+                "(lock_key, owner_id, acquired_at, expires_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(lock_key) DO UPDATE SET "
+                "acquired_at=excluded.acquired_at, "
+                "expires_at=excluded.expires_at "
+                "WHERE trade_job_locks.owner_id=excluded.owner_id",
+                (
+                    lock_key,
+                    owner_id,
+                    _db_timestamp(now),
+                    _db_timestamp(expires_at),
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_job_lock(self, *, lock_key: str, owner_id: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM trade_job_locks WHERE lock_key=? AND owner_id=?",
+                (lock_key, owner_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -342,22 +1172,7 @@ class TradingRepository:
             row = conn.execute(
                 "SELECT * FROM trade_jobs WHERE id = ?", (job_id,)
             ).fetchone()
-            if not row:
-                return None
-            d = dict(row)
-            try:
-                d["request"] = json.loads(d.pop("request_json") or "{}")
-            except ValueError:
-                d["request"] = {}
-            try:
-                d["result"] = json.loads(d.pop("result_json") or "null")
-            except ValueError:
-                d["result"] = None
-            try:
-                d["error"] = json.loads(d.pop("error_json") or "null")
-            except ValueError:
-                d["error"] = None
-            return d
+            return self._decode_job_row(row)
         finally:
             conn.close()
 
@@ -543,6 +1358,201 @@ class TradingRepository:
         finally:
             conn.close()
 
+    def record_execution_atomic(
+        self,
+        *,
+        account_id: int,
+        stock_code: str,
+        side: str,
+        trade_date: str,
+        price: float,
+        quantity: int,
+        commission: float = 0,
+        tax: float = 0,
+        client_execution_id: str,
+        note: str = "",
+        plan_item_id: int | None = None,
+    ) -> dict:
+        """Atomically update cash/position and persist execution/audit."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM trade_executions "
+                "WHERE client_execution_id=?",
+                (client_execution_id,),
+            ).fetchone()
+            if existing is not None:
+                execution = dict(existing)
+                requested = {
+                    "account_id": account_id,
+                    "plan_item_id": plan_item_id,
+                    "stock_code": stock_code,
+                    "side": side,
+                    "trade_date": trade_date,
+                    "price": price,
+                    "quantity": quantity,
+                    "commission": commission,
+                    "tax": tax,
+                    "note": note,
+                }
+                conflicting_fields = [
+                    field
+                    for field, value in requested.items()
+                    if execution[field] != value
+                ]
+                if conflicting_fields:
+                    raise ExecutionIdempotencyConflictError(
+                        "client_execution_id 已绑定其他成交载荷",
+                        details={
+                            "client_execution_id": client_execution_id,
+                            "conflicting_fields": conflicting_fields,
+                        },
+                    )
+                execution["reused"] = True
+                position = conn.execute(
+                    "SELECT * FROM trade_positions "
+                    "WHERE account_id=? AND stock_code=?",
+                    (execution["account_id"], execution["stock_code"]),
+                ).fetchone()
+                conn.commit()
+                return {
+                    "execution": execution,
+                    "position": dict(position) if position else None,
+                }
+
+            account = conn.execute(
+                "SELECT * FROM trade_accounts WHERE id=?", (account_id,)
+            ).fetchone()
+            if account is None:
+                raise ValueError(f"账户 {account_id} 不存在")
+            position = conn.execute(
+                "SELECT * FROM trade_positions "
+                "WHERE account_id=? AND stock_code=?",
+                (account_id, stock_code),
+            ).fetchone()
+            trade_value = price * quantity
+
+            if side == "BUY":
+                total_cost = trade_value + commission + tax
+                if account["cash_balance"] < total_cost:
+                    raise ValueError(
+                        f"现金不足:需要 {total_cost},"
+                        f"可用 {account['cash_balance']}"
+                    )
+                conn.execute(
+                    "UPDATE trade_accounts SET cash_balance=?, "
+                    "updated_at=datetime('now','localtime') WHERE id=?",
+                    (account["cash_balance"] - total_cost, account_id),
+                )
+                if position is None:
+                    conn.execute(
+                        "INSERT INTO trade_positions "
+                        "(account_id, stock_code, quantity, "
+                        "available_quantity, average_cost) "
+                        "VALUES (?, ?, ?, 0, ?)",
+                        (account_id, stock_code, quantity, price),
+                    )
+                else:
+                    new_quantity = position["quantity"] + quantity
+                    average_cost = (
+                        position["quantity"] * position["average_cost"]
+                        + trade_value
+                    ) / new_quantity
+                    conn.execute(
+                        "UPDATE trade_positions SET quantity=?, "
+                        "average_cost=?, updated_at=datetime('now','localtime') "
+                        "WHERE id=?",
+                        (new_quantity, average_cost, position["id"]),
+                    )
+            elif side == "SELL":
+                if position is None or position["quantity"] == 0:
+                    raise ValueError(f"无 {stock_code} 持仓,无法卖出")
+                if position["available_quantity"] < quantity:
+                    raise ValueError(
+                        f"可卖数量不足:需要 {quantity},"
+                        f"可用 {position['available_quantity']}"
+                    )
+                net_proceeds = trade_value - commission - tax
+                conn.execute(
+                    "UPDATE trade_accounts SET cash_balance=?, "
+                    "updated_at=datetime('now','localtime') WHERE id=?",
+                    (account["cash_balance"] + net_proceeds, account_id),
+                )
+                new_quantity = position["quantity"] - quantity
+                if new_quantity == 0:
+                    conn.execute(
+                        "DELETE FROM trade_positions WHERE id=?",
+                        (position["id"],),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE trade_positions SET quantity=?, "
+                        "available_quantity=?, "
+                        "updated_at=datetime('now','localtime') WHERE id=?",
+                        (
+                            new_quantity,
+                            position["available_quantity"] - quantity,
+                            position["id"],
+                        ),
+                    )
+            else:
+                raise ValueError(f"未知 side: {side}(仅支持 BUY/SELL)")
+
+            cursor = conn.execute(
+                "INSERT INTO trade_executions "
+                "(account_id, plan_item_id, stock_code, side, trade_date, "
+                "price, quantity, commission, tax, note, "
+                "client_execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    account_id,
+                    plan_item_id,
+                    stock_code,
+                    side,
+                    trade_date,
+                    price,
+                    quantity,
+                    commission,
+                    tax,
+                    note,
+                    client_execution_id,
+                ),
+            )
+            execution = dict(
+                conn.execute(
+                    "SELECT * FROM trade_executions WHERE id=?",
+                    (cursor.lastrowid,),
+                ).fetchone()
+            )
+            execution["reused"] = False
+            conn.execute(
+                "INSERT INTO trade_audit_logs "
+                "(actor, action, entity_type, entity_id, after_json) "
+                "VALUES ('user', ?, 'execution', ?, ?)",
+                (
+                    f"EXECUTION_{side}",
+                    str(execution["id"]),
+                    json.dumps(execution, ensure_ascii=False),
+                ),
+            )
+            current_position = conn.execute(
+                "SELECT * FROM trade_positions "
+                "WHERE account_id=? AND stock_code=?",
+                (account_id, stock_code),
+            ).fetchone()
+            conn.commit()
+            return {
+                "execution": execution,
+                "position": (
+                    dict(current_position) if current_position else None
+                ),
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def get_execution_by_client_id(self, client_execution_id: str) -> dict | None:
         """按 client_execution_id 查找成交(供服务层幂等检查使用)。
 
@@ -580,6 +1590,56 @@ class TradingRepository:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def roll_t1_available_atomic(
+        self, account_id: int, trade_date: str
+    ) -> int:
+        """Atomically unlock prior-day holdings without stale-row writes."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            buy_rows = conn.execute(
+                "SELECT stock_code, SUM(quantity) AS quantity "
+                "FROM trade_executions WHERE account_id=? "
+                "AND trade_date=? AND side='BUY' GROUP BY stock_code",
+                (account_id, trade_date),
+            ).fetchall()
+            same_day_buys = {
+                row["stock_code"]: row["quantity"] for row in buy_rows
+            }
+            positions = conn.execute(
+                "SELECT id, stock_code, quantity, available_quantity "
+                "FROM trade_positions WHERE account_id=?",
+                (account_id,),
+            ).fetchall()
+            changed = 0
+            for position in positions:
+                if position["quantity"] <= 0:
+                    continue
+                available = max(
+                    0,
+                    position["quantity"]
+                    - same_day_buys.get(position["stock_code"], 0),
+                )
+                if position["available_quantity"] == available:
+                    continue
+                updated = conn.execute(
+                    "UPDATE trade_positions SET available_quantity=? "
+                    "WHERE id=? AND available_quantity=?",
+                    (
+                        available,
+                        position["id"],
+                        position["available_quantity"],
+                    ),
+                )
+                changed += updated.rowcount
+            conn.commit()
+            return changed
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -802,16 +1862,25 @@ class TradingRepository:
                         target_trade_date: str, stock_pool_version_id: int,
                         strategy_version_id: int, status: str,
                         account_snapshot_json: dict, data_snapshot_hash: str,
-                        warnings: list | None = None) -> dict:
+                        warnings: list | None = None,
+                        generation_owner_id: str | None = None,
+                        generation_now: datetime | None = None,
+                        generation_expires_at: datetime | None = None) -> dict:
         """创建计划运行。run_key UNIQUE 命中则返回已有(reused=True)。"""
         warnings = warnings or []
+        if generation_owner_id is not None and (
+            generation_now is None or generation_expires_at is None
+        ):
+            raise ValueError("generation lease 必须同时提供 now 和 expires_at")
         conn = self._conn()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT id FROM trade_plan_runs WHERE run_key = ?",
                 (run_key,),
             ).fetchone()
             if existing:
+                conn.commit()
                 return {"id": existing["id"], "run_key": run_key, "reused": True}
             cur = conn.execute(
                 "INSERT INTO trade_plan_runs "
@@ -826,8 +1895,117 @@ class TradingRepository:
                  json.dumps(warnings, ensure_ascii=False)),
             )
             run_id = cur.lastrowid
+            if generation_owner_id is not None:
+                conn.execute(
+                    "INSERT INTO trade_job_locks "
+                    "(lock_key, owner_id, acquired_at, expires_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        self._plan_generation_lease_key(run_id),
+                        generation_owner_id,
+                        _db_lease_timestamp(generation_now),
+                        _db_lease_timestamp(generation_expires_at),
+                    ),
+                )
             conn.commit()
             return {"id": run_id, "run_key": run_key, "reused": False}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def recover_stale_plan_run_and_create_successor(
+        self,
+        *,
+        stale_run_id: int,
+        run_key: str,
+        account_id: int,
+        signal_date: str,
+        target_trade_date: str,
+        stock_pool_version_id: int,
+        strategy_version_id: int,
+        account_snapshot_json: dict,
+        data_snapshot_hash: str,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+        warnings: list | None = None,
+    ) -> dict:
+        """Atomically fence an expired in-progress owner and create its successor."""
+        warnings = warnings or []
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            stale = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE id=?",
+                (stale_run_id,),
+            ).fetchone()
+            if stale is None:
+                conn.commit()
+                return {"recovered": False, "run": None}
+            if stale["status"] not in ("CREATED", "VALIDATING", "GENERATING"):
+                conn.commit()
+                return {"recovered": False, "run": self._row_to_plan_run(stale)}
+            lock_key = self._plan_generation_lease_key(stale_run_id)
+            lease = conn.execute(
+                "SELECT owner_id, expires_at FROM trade_job_locks WHERE lock_key=?",
+                (lock_key,),
+            ).fetchone()
+            if lease is not None and lease["expires_at"] > _db_lease_timestamp(now):
+                conn.commit()
+                return {"recovered": False, "run": self._row_to_plan_run(stale)}
+            conn.execute("DELETE FROM trade_job_locks WHERE lock_key=?", (lock_key,))
+            cur = conn.execute(
+                "INSERT INTO trade_plan_runs "
+                "(run_key, account_id, signal_date, target_trade_date, "
+                " stock_pool_version_id, strategy_version_id, status, "
+                " account_snapshot_json, data_snapshot_hash, warnings_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, datetime('now','localtime'))",
+                (
+                    run_key, account_id, signal_date, target_trade_date,
+                    stock_pool_version_id, strategy_version_id,
+                    json.dumps(account_snapshot_json, ensure_ascii=False),
+                    data_snapshot_hash, json.dumps(warnings, ensure_ascii=False),
+                ),
+            )
+            successor_id = cur.lastrowid
+            recovery_marker = {
+                "code": "PLAN_GENERATION_RECOVERED",
+                "message": "generation owner lease expired; created successor plan",
+                "details": {
+                    "reason": "GENERATION_LEASE_EXPIRED",
+                    "successor_run_id": successor_id,
+                    "original_run_key": stale["run_key"],
+                },
+            }
+            fenced = conn.execute(
+                "UPDATE trade_plan_runs SET status='SUPERSEDED', superseded_by_id=?, "
+                "error_json=? "
+                "WHERE id=? AND status IN ('CREATED','VALIDATING','GENERATING')",
+                (successor_id, json.dumps(recovery_marker, ensure_ascii=False), stale_run_id),
+            )
+            if fenced.rowcount != 1:
+                conn.rollback()
+                return {"recovered": False, "run": self.get_plan_run(stale_run_id)}
+            conn.execute(
+                "INSERT INTO trade_job_locks "
+                "(lock_key, owner_id, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
+                (
+                    self._plan_generation_lease_key(successor_id),
+                    owner_id,
+                    _db_lease_timestamp(now),
+                    _db_lease_timestamp(expires_at),
+                ),
+            )
+            successor = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE id=?", (successor_id,)
+            ).fetchone()
+            conn.commit()
+            return {"recovered": True, "run": self._row_to_plan_run(successor)}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -852,7 +2030,8 @@ class TradingRepository:
             conn.close()
 
     def list_plan_runs(self, signal_date: str | None = None,
-                       status: str | None = None) -> list[dict]:
+                       status: str | None = None,
+                       account_id: int | None = None) -> list[dict]:
         clauses = []
         params: list = []
         if signal_date:
@@ -861,6 +2040,9 @@ class TradingRepository:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if account_id is not None:
+            clauses.append("account_id = ?")
+            params.append(account_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         conn = self._conn()
         try:
@@ -876,7 +2058,9 @@ class TradingRepository:
                                error: dict | None = None,
                                market_regime: str | None = None,
                                market_score: int | None = None,
-                               recommended_exposure: float | None = None) -> None:
+                               recommended_exposure: float | None = None,
+                               warnings: list | None = None,
+                               degraded: bool | None = None) -> None:
         sets = ["status = ?"]
         params: list = [status]
         if error is not None:
@@ -891,6 +2075,12 @@ class TradingRepository:
         if recommended_exposure is not None:
             sets.append("recommended_exposure = ?")
             params.append(recommended_exposure)
+        if warnings is not None:
+            sets.append("warnings_json = ?")
+            params.append(json.dumps(warnings, ensure_ascii=False))
+        if degraded is not None:
+            sets.append("degraded = ?")
+            params.append(1 if degraded else 0)
         params.append(run_id)
         conn = self._conn()
         try:
@@ -914,22 +2104,25 @@ class TradingRepository:
         finally:
             conn.close()
 
-    def publish_plan_run(self, run_id: int) -> None:
+    def publish_plan_run(self, run_id: int) -> bool:
+        """Publish only a still-executable plan; never revive a fenced row."""
         conn = self._conn()
         try:
-            conn.execute(
+            updated = conn.execute(
                 "UPDATE trade_plan_runs "
                 "SET status = 'PUBLISHED', published_at = datetime('now','localtime') "
-                "WHERE id = ?",
+                "WHERE id = ? AND status IN ('READY', 'PARTIAL')",
                 (run_id,),
             )
             conn.commit()
+            return updated.rowcount == 1
         finally:
             conn.close()
 
     @staticmethod
     def _row_to_plan_run(row) -> dict:
         d = dict(row)
+        d["degraded"] = bool(d.get("degraded", 0))
         try:
             d["account_snapshot"] = json.loads(d.pop("account_snapshot_json") or "{}")
         except (ValueError, TypeError):
@@ -982,6 +2175,186 @@ class TradingRepository:
             conn.commit()
             return {"id": item_id, "plan_run_id": plan_run_id,
                     "stock_code": stock_code, "action": action}
+        finally:
+            conn.close()
+
+    def transition_plan_run_status(
+        self,
+        run_id: int,
+        status: str,
+        *,
+        expected_statuses: tuple[str, ...],
+        generation_owner_id: str,
+        now: datetime,
+        error: dict | None = None,
+    ) -> bool:
+        """Transition only while this owner holds a live generation lease."""
+        if not expected_statuses:
+            raise ValueError("expected_statuses 不能为空")
+        placeholders = ", ".join("?" for _ in expected_statuses)
+        sets = ["status = ?"]
+        params: list = [status]
+        if error is not None:
+            sets.append("error_json = ?")
+            params.append(json.dumps(error, ensure_ascii=False))
+        params.extend([
+            run_id,
+            *expected_statuses,
+            run_id,
+            generation_owner_id,
+            _db_lease_timestamp(now),
+        ])
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                f"UPDATE trade_plan_runs SET {', '.join(sets)} "
+                f"WHERE id=? AND status IN ({placeholders}) "
+                "AND EXISTS ("
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key='plan-generation:' || ? "
+                "AND owner_id=? AND expires_at > ?"
+                ")",
+                params,
+            )
+            conn.commit()
+            return updated.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _plan_item_row(plan_run_id: int, item: dict) -> tuple:
+        return (
+            plan_run_id,
+            item["stock_code"], item.get("stock_name"), item["action"],
+            item.get("score"), item.get("rank_no"),
+            item.get("trigger_price"), item.get("do_not_chase_price"),
+            item.get("stop_price"), item.get("target_2r_price"),
+            item.get("suggested_quantity", 0),
+            item.get("suggested_position_pct", 0),
+            item.get("risk_amount", 0), item.get("risk_pct", 0),
+            json.dumps(item.get("rule_hits_json", []), ensure_ascii=False),
+            json.dumps(item.get("rule_misses_json", []), ensure_ascii=False),
+            item.get("invalidation_reason"),
+            item.get("execution_status", "PENDING"),
+        )
+
+    def finalize_plan_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        items: tuple[dict, ...],
+        market_regime: str,
+        market_score: int,
+        recommended_exposure: float,
+        warnings: list[str],
+        degraded: bool,
+        generation_owner_id: str,
+        now: datetime,
+    ) -> dict:
+        """Persist a successful run and fence all peer executable plans atomically."""
+        if status not in ("READY", "PARTIAL"):
+            raise ValueError(f"不可作为计划成功终态: {status}")
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if current is None:
+                raise ValueError(f"计划 {run_id} 不存在")
+            if current["status"] != "GENERATING":
+                conn.commit()
+                return self._row_to_plan_run(current)
+
+            lease = conn.execute(
+                "SELECT 1 FROM trade_job_locks "
+                "WHERE lock_key='plan-generation:' || ? "
+                "AND owner_id=? AND expires_at > ?",
+                (run_id, generation_owner_id, _db_lease_timestamp(now)),
+            ).fetchone()
+            if lease is None:
+                conn.commit()
+                return self._row_to_plan_run(current)
+
+            published = conn.execute(
+                "SELECT id FROM trade_plan_runs WHERE account_id=? AND signal_date=? "
+                "AND status='PUBLISHED' ORDER BY id DESC LIMIT 1",
+                (current["account_id"], current["signal_date"]),
+            ).fetchone()
+            if published is not None:
+                conn.execute(
+                    "UPDATE trade_plan_runs SET status='SUPERSEDED', superseded_by_id=? "
+                    "WHERE id=? AND status='GENERATING'",
+                    (published["id"], run_id),
+                )
+                final = conn.execute(
+                    "SELECT * FROM trade_plan_runs WHERE id=?", (run_id,)
+                ).fetchone()
+                conn.commit()
+                return self._row_to_plan_run(final)
+
+            if items:
+                conn.executemany(
+                    "INSERT INTO trade_plan_items "
+                    "(plan_run_id, stock_code, stock_name, action, score, rank_no, "
+                    " trigger_price, do_not_chase_price, stop_price, target_2r_price, "
+                    " suggested_quantity, suggested_position_pct, risk_amount, risk_pct, "
+                    " rule_hits_json, rule_misses_json, invalidation_reason, execution_status, "
+                    " created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    " datetime('now','localtime'))",
+                    [self._plan_item_row(run_id, item) for item in items],
+                )
+            updated = conn.execute(
+                "UPDATE trade_plan_runs SET status=?, market_regime=?, market_score=?, "
+                "recommended_exposure=?, warnings_json=?, degraded=? "
+                "WHERE id=? AND status='GENERATING'",
+                (
+                    status, market_regime, market_score, recommended_exposure,
+                    json.dumps(warnings, ensure_ascii=False), 1 if degraded else 0,
+                    run_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                return self.get_plan_run(run_id)
+            conn.execute(
+                "UPDATE trade_plan_runs SET status='SUPERSEDED', superseded_by_id=? "
+                "WHERE account_id=? AND signal_date=? AND id<>? "
+                "AND status IN ('CREATED','VALIDATING','GENERATING','READY','PARTIAL','BLOCKED','FAILED')",
+                (run_id, current["account_id"], current["signal_date"], run_id),
+            )
+            final = conn.execute(
+                "SELECT * FROM trade_plan_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            conn.commit()
+            return self._row_to_plan_run(final)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_plan_item_execution_status(
+        self,
+        item_id: int,
+        expected_status: str,
+        new_status: str,
+    ) -> bool:
+        conn = self._conn()
+        try:
+            updated = conn.execute(
+                "UPDATE trade_plan_items SET execution_status=? "
+                "WHERE id=? AND execution_status=?",
+                (new_status, item_id, expected_status),
+            )
+            conn.commit()
+            return updated.rowcount == 1
         finally:
             conn.close()
 

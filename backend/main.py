@@ -4,13 +4,14 @@ import os
 import shutil
 import time as _time
 import uuid as _uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from backend.config import settings
 from backend.crawler import crawl_and_save
@@ -18,9 +19,31 @@ from backend.database import Database
 from backend.lhb_crawler import crawl_lhb, update_lhb_pool
 from backend.models import UploadResult
 from backend.ocr import analyze_image
-from backend.trading.router import router as trading_router
+from backend.trading.health import check_sqlite_database, check_trading_schema
+from backend.trading.migrations import run_migrations
+from backend.trading.router import (
+    configure_runtime as configure_trading_runtime,
+    router as trading_router,
+)
 
-app = FastAPI(title="Stock Analysis Hub")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """在监听可用前完成同一路径的 DB 与交易运行时装配。"""
+    global db
+    if settings.trading_enabled:
+        run_migrations(settings.db_path)
+    runtime_db = Database(settings.db_path)
+    if settings.trading_enabled:
+        configure_trading_runtime(settings)
+        schema = check_trading_schema(settings.db_path)
+        if schema["status"] != "ok":
+            raise RuntimeError(f"TRADING_SCHEMA_NOT_READY: {schema}")
+    db = runtime_db
+    yield
+
+
+app = FastAPI(title="Stock Analysis Hub", lifespan=lifespan)
 
 _logging.basicConfig(level=_logging.INFO, format='%(message)s')
 _logger = _logging.getLogger("stockpulse")
@@ -89,12 +112,33 @@ async def admin():
 
 @app.get("/api/health")
 async def health_check():
-    """健康检查(spec §13.5):Web + 数据库。"""
-    try:
-        db.execute("SELECT 1")
-        return {"status": "ok", "db": "ok"}
-    except Exception as e:
-        return {"status": "degraded", "db": "error", "detail": str(e)}
+    """健康检查(spec §13.5):Web、SQLite 完整性与交易 schema。"""
+    payload = {
+        "status": "ok",
+        "web": "ok",
+        "db": "ok",
+        "trading_schema": None,
+    }
+    status_code = 200
+
+    database_health = check_sqlite_database(settings.db_path)
+    if database_health["status"] != "ok":
+        payload["status"] = "degraded"
+        payload["db"] = "error"
+        payload["db_detail"] = database_health.get("detail")
+        status_code = 503
+
+    if settings.trading_enabled:
+        try:
+            schema = check_trading_schema(settings.db_path)
+        except Exception as exc:
+            schema = {"status": "error", "detail": str(exc)}
+        payload["trading_schema"] = schema
+        if schema["status"] != "ok":
+            payload["status"] = "degraded"
+            status_code = 503
+
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.post("/api/upload")

@@ -1,6 +1,4 @@
-import json
 from datetime import date
-from unittest.mock import patch
 import pytest
 
 from backend.trading.providers.eastmoney import EastmoneyProvider
@@ -8,9 +6,23 @@ from backend.trading.providers.base import ProviderError
 from tests.trading.test_provider_contract import ProviderContractTest, load_fixture
 
 
-def _mock_response(payload: dict):
+def _mock_response(payload: dict, symbol: str = "sz000001"):
     """_http_get 契约:返回已解析的 JSON dict(见 eastmoney._http_get 的 -> dict)。"""
+    payload.setdefault("code", 0)
+    payload.setdefault("msg", "")
+    data = payload.get("data")
+    if isinstance(data, dict):
+        bare_key = next(
+            (key for key in data if len(key) == 6 and key.isdigit()), None
+        )
+        if bare_key is not None:
+            data[symbol] = data.pop(bare_key)
     return payload
+
+
+def _daily_bars_fixture_for(symbol: str) -> dict:
+    payload = load_fixture("daily_bars_em.json")
+    return _mock_response(payload, symbol)
 
 
 class TestEastmoneyContract(ProviderContractTest):
@@ -58,6 +70,36 @@ def test_get_daily_bars_filters_date_range(monkeypatch):
     assert dates == [date(2026, 7, 15), date(2026, 7, 16), date(2026, 7, 17)]
 
 
+def test_get_daily_bars_resolves_bare_0009_code_as_stock(monkeypatch):
+    provider = EastmoneyProvider()
+    requested_params = []
+
+    def fake_get(*args, **kwargs):
+        requested_params.append(kwargs["params"]["param"])
+        return _mock_response(_daily_bars_fixture_for("sz000936"))
+
+    monkeypatch.setattr(provider, "_http_get", fake_get)
+    bars = provider.get_daily_bars(["000936"], date(2026, 7, 14), date(2026, 7, 20))
+
+    assert requested_params[0].startswith("sz000936,")
+    assert {bar.code for bar in bars} == {"000936.SZ"}
+
+
+def test_get_index_bars_resolves_known_bare_index(monkeypatch):
+    provider = EastmoneyProvider()
+    requested_params = []
+
+    def fake_get(*args, **kwargs):
+        requested_params.append(kwargs["params"]["param"])
+        return _mock_response(_daily_bars_fixture_for("sh000905"))
+
+    monkeypatch.setattr(provider, "_http_get", fake_get)
+    bars = provider.get_index_bars(["000905"], date(2026, 7, 14), date(2026, 7, 20))
+
+    assert requested_params[0].startswith("sh000905,")
+    assert {bar.code for bar in bars} == {"000905.SH"}
+
+
 def test_get_daily_bars_http_error_raises(monkeypatch):
     import httpx
     provider = EastmoneyProvider()
@@ -70,11 +112,55 @@ def test_get_daily_bars_http_error_raises(monkeypatch):
     assert exc.value.retriable is True
 
 
-def test_secid_for_sh():
+def test_tencent_symbol_uses_exchange_prefix():
     provider = EastmoneyProvider()
-    assert provider._secid("600000.SH") == "1.600000"
-    assert provider._secid("000001.SZ") == "0.000001"
-    assert provider._secid("000300.SH") == "1.000300"
+    assert provider._tencent_symbol("000001.SZ") == "sz000001"
+    assert provider._tencent_symbol("600000.SH") == "sh600000"
+    assert provider._tencent_symbol("000300.SH") == "sh000300"
+    assert provider._tencent_symbol("920000.BJ") == "bj920000"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"code": 1, "msg": "", "data": {}},
+        {"code": 0, "msg": "", "data": []},
+        {"code": 0, "msg": "", "data": {"sz000001": []}},
+        {
+            "code": 0,
+            "msg": "",
+            "data": {"sz000001": {"qfqday": "not-a-list"}},
+        },
+        {"code": 0, "msg": "", "data": {"sz000001": {"qfqday": {}}}},
+        {"code": 0, "msg": "", "data": {"sz000001": {"qfqday": ""}}},
+        {"code": 0, "msg": "", "data": {"sz000001": {"qfqday": 0}}},
+        {
+            "code": 0,
+            "msg": "",
+            "data": {"sz000001": {"qfqday": [{"date": "2026-07-14"}]}},
+        },
+    ],
+    ids=[
+        "non-object",
+        "error-code",
+        "non-object-data",
+        "non-object-node",
+        "non-list-bars",
+        "falsey-object-bars",
+        "falsey-string-bars",
+        "falsey-number-bars",
+        "non-row-bar",
+    ],
+)
+def test_tencent_protocol_error_raises_provider_error(monkeypatch, payload):
+    provider = EastmoneyProvider()
+    monkeypatch.setattr(provider, "_http_get", lambda *args, **kwargs: payload)
+
+    with pytest.raises(ProviderError, match="协议错误"):
+        provider.get_daily_bars(
+            ["000001.SZ"], date(2026, 7, 14), date(2026, 7, 20)
+        )
 
 
 def test_empty_response_returns_empty_list(monkeypatch):
@@ -84,3 +170,10 @@ def test_empty_response_returns_empty_list(monkeypatch):
                         lambda *a, **k: _mock_response(load_fixture("empty_response.json")))
     bars = provider.get_daily_bars(["000001.SZ"], date(2026, 7, 14), date(2026, 7, 20))
     assert bars == []
+
+
+def test_eastmoney_calendar_is_not_faked_from_weekdays():
+    provider = EastmoneyProvider()
+    with pytest.raises(ProviderError) as exc:
+        provider.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 1))
+    assert exc.value.retriable is False

@@ -3,7 +3,8 @@ import pytest
 
 from backend.trading.providers.composite import CompositeProvider
 from backend.trading.providers.base import ProviderError, ProviderUnavailable
-from backend.trading.domain import DailyBar
+from backend.trading.providers.eastmoney import EastmoneyProvider
+from backend.trading.domain import DailyBar, TradeDay
 
 
 def _make_bar(code="000001.SZ"):
@@ -84,4 +85,81 @@ def test_composite_non_retriable_skips_retry():
     cp = CompositeProvider([primary, fallback], max_retries=3, retry_base_delay=0)
     cp.get_daily_bars(["000001.SZ"], date(2026, 7, 14), date(2026, 7, 20))
     assert primary.call_count == 1  # 不重试
+    assert fallback.call_count == 1
+
+
+def test_composite_falls_back_on_tencent_protocol_error(monkeypatch):
+    primary = EastmoneyProvider()
+    monkeypatch.setattr(
+        primary,
+        "_http_get",
+        lambda *args, **kwargs: {
+            "code": 0,
+            "msg": "param error",
+            "data": [],
+        },
+    )
+    fallback = FakeProvider("akshare", bars=[_make_bar()])
+    cp = CompositeProvider(
+        [primary, fallback], max_retries=1, retry_base_delay=0
+    )
+
+    bars = cp.get_daily_bars(
+        ["000001.SZ"], date(2026, 7, 14), date(2026, 7, 20)
+    )
+
+    assert len(bars) == 1
+    assert fallback.call_count == 1
+
+
+def test_calendar_failure_does_not_circuit_daily_bars():
+    class CalendarUnsupportedProvider(FakeProvider):
+        def get_trade_calendar(self, start, end):
+            raise ProviderError(
+                self.name, "no trusted calendar", retriable=False
+            )
+
+    class CalendarFallbackProvider(FakeProvider):
+        def get_trade_calendar(self, start, end):
+            return []
+
+    primary = CalendarUnsupportedProvider("eastmoney", bars=[_make_bar()])
+    fallback = CalendarFallbackProvider("akshare", bars=[_make_bar()])
+    cp = CompositeProvider([primary, fallback], max_retries=1, retry_base_delay=0)
+
+    cp.get_trade_calendar(date(2026, 10, 1), date(2026, 10, 1))
+    bars = cp.get_daily_bars(
+        ["000001.SZ"], date(2026, 7, 14), date(2026, 7, 20)
+    )
+
+    assert len(bars) == 1
+    assert primary.call_count == 1
+    assert fallback.call_count == 0
+
+
+def test_calendar_with_source_uses_fallback_provider_name():
+    class BrokenCalendarProvider(FakeProvider):
+        def get_trade_calendar(self, start, end):
+            self.call_count += 1
+            raise ProviderError(self.name, "calendar down", retriable=True)
+
+    class CalendarProvider(FakeProvider):
+        def get_trade_calendar(self, start, end):
+            self.call_count += 1
+            return [
+                TradeDay(date(2026, 10, 1), False),
+                TradeDay(date(2026, 10, 2), False),
+            ]
+
+    primary = BrokenCalendarProvider("eastmoney")
+    fallback = CalendarProvider("akshare")
+    cp = CompositeProvider([primary, fallback], max_retries=1, retry_base_delay=0)
+
+    days, source = cp.get_trade_calendar_with_source(
+        date(2026, 10, 1), date(2026, 10, 2)
+    )
+
+    assert len(days) == 2
+    assert source == "akshare"
+    assert primary.call_count == 1
     assert fallback.call_count == 1

@@ -4,6 +4,7 @@
 """
 import csv
 import io
+from datetime import date
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -41,7 +42,7 @@ class StockPoolImportRequest(BaseModel):
                 raw_code = (row.get("code") or row.get("stock_code") or "").strip()
                 if not raw_code:
                     continue
-                normalized = normalize_stock_code(raw_code)
+                normalized = normalize_stock_code(raw_code, kind="stock")
                 if normalized in seen:
                     continue
                 seen.add(normalized)
@@ -58,7 +59,7 @@ class StockPoolImportRequest(BaseModel):
                 parts = line.replace("\t", " ").replace(",", " ").split()
                 raw_code = parts[0]
                 try:
-                    normalized = normalize_stock_code(raw_code)
+                    normalized = normalize_stock_code(raw_code, kind="stock")
                 except ValueError:
                     continue  # 跳过无法解析的行
                 if normalized in seen:
@@ -106,11 +107,31 @@ class DataJobCreateRequest(BaseModel):
     end_date: str | None = None
     stock_codes: list[str] | None = None  # None 表示股票池全部
 
+    @field_validator("trade_date", "start_date", "end_date")
+    @classmethod
+    def _validate_iso_date(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return date.fromisoformat(value).isoformat()
+
+    @field_validator("stock_codes")
+    @classmethod
+    def _normalize_stock_codes(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        return sorted({normalize_stock_code(code) for code in value})
+
     @model_validator(mode="after")
     def _check_dates(self):
-        if self.job_type == "backfill_bars":
+        if self.job_type in {"backfill_bars", "refresh_calendar"}:
             if not self.start_date or not self.end_date:
-                raise ValueError("backfill_bars 必须提供 start_date 和 end_date")
+                raise ValueError(
+                    f"{self.job_type} 必须提供 start_date 和 end_date"
+                )
+            if self.start_date > self.end_date:
+                raise ValueError("start_date 不能晚于 end_date")
         return self
 
 
@@ -120,9 +141,11 @@ class DataJobResponse(BaseModel):
     job_key: str
     status: str
     progress: float
+    attempts: int
     created_at: str
     started_at: str | None
     finished_at: str | None
+    result_json: dict | None = None
     error_json: dict | None = None
 
 
@@ -332,6 +355,22 @@ class PlanItemResponse(BaseModel):
     execution_status: str = "PENDING"
 
 
+class PlanRunSummaryResponse(BaseModel):
+    """计划列表摘要，显式绑定所属账户。"""
+    id: int
+    account_id: int
+    status: str
+    signal_date: str
+    target_trade_date: str
+    market_regime: str | None = None
+    market_score: int | None = None
+    recommended_exposure: float | None = None
+    warnings: list[str]
+    error: dict | None = None
+    created_at: str
+    published_at: str | None = None
+
+
 class PlanRunDetailResponse(BaseModel):
     """计划详情(spec §11.4)。"""
     id: int
@@ -340,9 +379,9 @@ class PlanRunDetailResponse(BaseModel):
     target_trade_date: str
     market_regime: str | None = None
     market_score: int | None = None
-    degraded: bool = False
+    degraded: bool
     recommended_exposure: float | None = None
-    warnings: list[str] = []
+    warnings: list[str]
     items: list[PlanItemResponse] = []
     created_at: str
     published_at: str | None = None

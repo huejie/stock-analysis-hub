@@ -16,26 +16,33 @@ entry_rules/exit_rules)、指标计算(indicator_service)、仓位计算(positio
 import hashlib
 import json
 import logging
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from threading import Event, Thread
+from typing import Callable
+from uuid import uuid4
 
+from ...config import settings
 from ..clock import target_trade_date_after
 from ..domain import DailyBar
 from ..errors import (
     PlanAlreadyPublishedError,
     PlanBlockedError,
+    PlanGenerationFailedError,
+    PlanSupersededError,
     StrategyNotActiveError,
 )
 from ..position_sizing import compute_buy_quantity, effective_risk_per_trade
 from ..strategies.entry_rules import evaluate_entry
 from ..strategies.exit_rules import evaluate_exit
-from ..strategies.market_regime import compute_market_score
+from ..strategies.market_regime import MarketRegimeResult, compute_market_score
 from ..strategies.scoring import compute_score
 from .indicator_service import compute_indicators, percentile_rank
 
 logger = logging.getLogger(__name__)
 
-# 默认基准(spec §8.4):沪深 300。中证 500 可配置,Phase 3 单基准足够。
-DEFAULT_BENCHMARK = "000300.SH"
+# 默认门禁基准(spec §8.4/§13.3):沪深 300 + 中证 500。
+DEFAULT_BENCHMARKS = ("000300.SH", "000905.SH")
 
 # Phase 3 简化默认值(production 应由 indicator_service 在全池上统计):
 _DEFAULT_POOL_RETURN_PERCENTILE = 0.6   # 池内 20 日收益分位近似
@@ -59,15 +66,170 @@ _STATUS_SUPERSEDED = "SUPERSEDED"
 
 # 可复用的终态(幂等命中时不重新生成)
 _REUSEABLE_STATUSES = (_STATUS_READY, _STATUS_PARTIAL, _STATUS_PUBLISHED)
-# 允许重新生成的非终态(旧计划可被覆盖重建)
-_REGENERATABLE_STATUSES = (_STATUS_BLOCKED, _STATUS_FAILED)
+_IN_PROGRESS_STATUSES = (
+    _STATUS_CREATED,
+    _STATUS_VALIDATING,
+    _STATUS_GENERATING,
+)
+
+
+@dataclass(frozen=True)
+class _PlanGenerationResult:
+    status: str
+    items: tuple[dict, ...]
+    market_regime: str
+    market_score: int
+    recommended_exposure: float
+    degraded: bool
+    warnings: tuple[str, ...]
+
+
+class _GenerationLeaseGuard:
+    """Cooperatively fences a plan owner if its Repository lease is lost."""
+
+    def __init__(self):
+        self.lost = Event()
+
+    def check(self) -> None:
+        if self.lost.is_set():
+            raise RuntimeError("plan generation lease lost")
+
+
+def _reused_plan_result(run: dict) -> dict:
+    return {
+        "id": run["id"],
+        "run_key": run["run_key"],
+        "status": run["status"],
+        "signal_date": run["signal_date"],
+        "target_trade_date": run["target_trade_date"],
+        "reused": True,
+        "warnings": run.get("warnings", []),
+    }
+
+
+def _trading_error_payload(error) -> dict:
+    return {
+        "code": error.code,
+        "message": error.message,
+        "details": error.details,
+    }
 
 
 class PlanService:
-    def __init__(self, repo, market_data_service, portfolio_service):
+    def __init__(self, repo, market_data_service, portfolio_service,
+                 benchmark_codes: list[str] | None = None,
+                 generation_now_fn: Callable[[], datetime] | None = None,
+                 generation_lease_seconds: float | None = None):
         self.repo = repo
         self.market_data_service = market_data_service  # check_data_health
         self.portfolio_service = portfolio_service       # compute_equity_snapshot / check_risk_limits
+        configured = benchmark_codes
+        if configured is None:
+            configured = [
+                code.strip()
+                for code in settings.trading_benchmark_codes.split(",")
+                if code.strip()
+            ]
+        self.benchmark_codes = list(configured)
+        self._generation_now_fn = generation_now_fn or (
+            lambda: datetime.now(timezone.utc)
+        )
+        self._generation_lease_seconds = float(
+            generation_lease_seconds
+            if generation_lease_seconds is not None
+            else settings.trading_job_lock_ttl_seconds
+        )
+        if self._generation_lease_seconds <= 0:
+            raise ValueError("generation_lease_seconds 必须为正数")
+
+    def _generation_now(self) -> datetime:
+        now = self._generation_now_fn()
+        return now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+
+    def _renew_generation_lease(
+        self, run_id: int, owner_id: str, guard: _GenerationLeaseGuard
+    ) -> None:
+        guard.check()
+        now = self._generation_now()
+        if not self.repo.renew_plan_generation_lease(
+            run_id,
+            owner_id=owner_id,
+            now=now,
+            expires_at=now + timedelta(seconds=self._generation_lease_seconds),
+        ):
+            guard.lost.set()
+            self._raise_lost_generation(run_id)
+
+    def _start_generation_heartbeat(
+        self, run_id: int, owner_id: str, guard: _GenerationLeaseGuard
+    ) -> tuple[Event, Thread]:
+        stop = Event()
+        interval = max(0.01, min(self._generation_lease_seconds / 3, 30.0))
+
+        def heartbeat_loop() -> None:
+            while not stop.wait(interval):
+                now = self._generation_now()
+                try:
+                    renewed = self.repo.renew_plan_generation_lease(
+                        run_id,
+                        owner_id=owner_id,
+                        now=now,
+                        expires_at=now + timedelta(
+                            seconds=self._generation_lease_seconds
+                        ),
+                    )
+                except Exception:
+                    guard.lost.set()
+                    return
+                if not renewed:
+                    guard.lost.set()
+                    return
+
+        heartbeat = Thread(
+            target=heartbeat_loop,
+            name=f"plan-generation-heartbeat-{run_id}",
+            daemon=True,
+        )
+        heartbeat.start()
+        return stop, heartbeat
+
+    def _raise_lost_generation(self, run_id: int) -> None:
+        current = self.repo.get_plan_run(run_id)
+        if current is not None and current["status"] == _STATUS_SUPERSEDED:
+            raise PlanSupersededError(
+                f"计划 {run_id} 已被后续版本替代",
+                details={
+                    "run_id": run_id,
+                    "run_key": current["run_key"],
+                    "status": current["status"],
+                },
+            )
+        raise PlanGenerationFailedError(
+            f"计划 {run_id} 丢失 generation owner lease",
+            details={"run_id": run_id},
+        )
+
+    def _transition_or_raise(
+        self,
+        run_id: int,
+        status: str,
+        *,
+        expected_statuses: tuple[str, ...],
+        owner_id: str,
+        guard: _GenerationLeaseGuard,
+        error: dict | None = None,
+    ) -> None:
+        guard.check()
+        if self.repo.transition_plan_run_status(
+            run_id,
+            status,
+            expected_statuses=expected_statuses,
+            generation_owner_id=owner_id,
+            now=self._generation_now(),
+            error=error,
+        ):
+            return
+        self._raise_lost_generation(run_id)
 
     # ===================================================================
     # 对外 API
@@ -104,6 +266,21 @@ class PlanService:
         pool = self.repo.get_stock_pool_version(stock_pool_version_id)
         if pool is None:
             raise ValueError(f"股票池版本 {stock_pool_version_id} 不存在")
+        pool_status = next(
+            (
+                row for row in self.repo.list_stock_pool_versions()
+                if row["id"] == stock_pool_version_id
+            ),
+            None,
+        )
+        if pool_status is not None and not pool_status["is_usable"]:
+            raise PlanBlockedError(
+                f"股票池版本 {stock_pool_version_id} 已失效，拒绝生成计划",
+                details={
+                    "stock_pool_version_id": stock_pool_version_id,
+                    "invalid_reason": pool_status["invalid_reason"],
+                },
+            )
 
         target_trade_date = target_trade_date_after(signal_date_d)
 
@@ -118,9 +295,14 @@ class PlanService:
         account_snapshot = self._account_snapshot(account)
         account_snapshot_hash = _stable_hash(account_snapshot)
 
-        # 基准行情(用于市场状态 + 数据快照哈希)。取到 signal_date 为止。
-        benchmark_bars = self._load_bars_up_to(
-            DEFAULT_BENCHMARK, signal_date_d, window=70,
+        # 基准行情(用于市场状态 + 数据快照哈希)。显式空配置进入受控降级，
+        # 不暗中回退默认基准。
+        benchmark_bars = (
+            self._load_bars_up_to(
+                self.benchmark_codes[0], signal_date_d, window=70,
+            )
+            if self.benchmark_codes
+            else []
         )
         data_snapshot_hash = self._data_snapshot_hash(
             benchmark_bars, pool.get("items", []), signal_date_d,
@@ -135,35 +317,18 @@ class PlanService:
             data_snapshot_hash=data_snapshot_hash,
         )
 
-        # ---- 幂等检查(spec §9.3)----
-        if not force_new_version:
-            existing = self.repo.get_plan_run_by_key(run_key)
-            if existing and existing["status"] in _REUSEABLE_STATUSES:
-                return {
-                    "id": existing["id"], "run_key": run_key,
-                    "status": existing["status"],
-                    "signal_date": existing["signal_date"],
-                    "target_trade_date": existing["target_trade_date"],
-                    "reused": True, "warnings": existing.get("warnings", []),
-                }
-            # BLOCKED/FAILED 允许重新生成:旧记录在下面 supersede。
-
-        # force_new_version 且 run_key 已存在时,派生一个新 run_key,
-        # 以便插入全新行(而非复用旧行)。spec §9.3:不得原地覆盖。
-        if force_new_version and self.repo.get_plan_run_by_key(run_key) is not None:
+        if force_new_version:
+            # 强制版本从一开始便使用独立 key，两个并发 force 请求也不会
+            # 因同一 UNIQUE key 偶然复用。
             run_key = self._derive_force_run_key(run_key)
 
-        # 旧计划(同 signal_date + account)在创建新 run 后被 SUPERSEDE。
-        prior_runs = self.repo.list_plan_runs(signal_date=signal_date_s)
-        prior_for_account = [
-            r for r in prior_runs
-            if r["account_id"] == account_id
-            and r["id"] is not None
-            and r["run_key"] != run_key
-            and r["status"] not in (_STATUS_SUPERSEDED, _STATUS_PUBLISHED)
-        ]
+        owner_id = f"plan-{uuid4().hex}"
+        lease_now = self._generation_now()
+        lease_expires_at = lease_now + timedelta(
+            seconds=self._generation_lease_seconds
+        )
 
-        # ---- 创建 CREATED 记录 ----
+        # ---- 原子创建 CREATED 记录 + generation lease ----
         created = self.repo.create_plan_run(
             run_key=run_key, account_id=account_id, signal_date=signal_date_s,
             target_trade_date=target_trade_date.isoformat(),
@@ -173,88 +338,198 @@ class PlanService:
             account_snapshot_json=account_snapshot,
             data_snapshot_hash=data_snapshot_hash,
             warnings=[],
+            generation_owner_id=owner_id,
+            generation_now=lease_now,
+            generation_expires_at=lease_expires_at,
         )
         run_id = created["id"]
+        if created["reused"]:
+            persisted = self.repo.get_plan_run(run_id)
+            if persisted is None:
+                raise RuntimeError(f"计划 {run_id} 幂等复用后不可读取")
+            if persisted["status"] == _STATUS_SUPERSEDED:
+                recovery_tip = self._resolve_recovery_successor(persisted)
+                if recovery_tip is not None:
+                    persisted = recovery_tip
+                    run_id = persisted["id"]
+                    run_key = persisted["run_key"]
+            if persisted["status"] in _IN_PROGRESS_STATUSES:
+                recovery = self.repo.recover_stale_plan_run_and_create_successor(
+                    stale_run_id=run_id,
+                    run_key=self._derive_force_run_key(run_key),
+                    account_id=account_id,
+                    signal_date=signal_date_s,
+                    target_trade_date=target_trade_date.isoformat(),
+                    stock_pool_version_id=stock_pool_version_id,
+                    strategy_version_id=strategy_version_id,
+                    account_snapshot_json=account_snapshot,
+                    data_snapshot_hash=data_snapshot_hash,
+                    owner_id=owner_id,
+                    now=lease_now,
+                    expires_at=lease_expires_at,
+                    warnings=[],
+                )
+                if recovery["recovered"]:
+                    persisted = recovery.get("run")
+                    if persisted is None:
+                        raise RuntimeError(
+                            f"计划 {run_id} 恢复成功后不可读取后继记录"
+                        )
+                    run_id = persisted["id"]
+                    run_key = persisted["run_key"]
+                    created = {"id": run_id, "run_key": run_key, "reused": False}
+                else:
+                    persisted = recovery.get("run")
+                    if persisted is None:
+                        raise RuntimeError(
+                            f"计划 {run_id} 恢复竞争后不可读取持久记录"
+                        )
+                    return self._resolve_existing_run(
+                        persisted,
+                        signal_date_d=signal_date_d,
+                        pool_name=pool["pool_name"],
+                    )
+            else:
+                return self._resolve_existing_run(
+                    persisted,
+                    signal_date_d=signal_date_d,
+                    pool_name=pool["pool_name"],
+                )
+
         warnings: list[str] = []
-
-        # ---- 步骤 2: VALIDATING —— 数据质量门禁 ----
-        self.repo.update_plan_run_status(run_id, _STATUS_VALIDATING)
-        pool_name = pool["pool_name"]
-        health = self.market_data_service.check_data_health(
-            trade_date=signal_date_d, pool_name=pool_name,
-            benchmark_codes=[DEFAULT_BENCHMARK],
+        guard = _GenerationLeaseGuard()
+        stop_heartbeat, heartbeat = self._start_generation_heartbeat(
+            run_id, owner_id, guard
         )
-        # 持仓行情缺失检查(spec 场景 B):任一持仓缺 signal_date 行情 → BLOCKED。
-        position_missing = self._positions_missing_on(account_id, signal_date_d)
-        if position_missing:
-            self.repo.update_plan_run_status(
-                run_id, _STATUS_BLOCKED,
-                error={"code": "POSITION_DATA_MISSING",
-                       "missing": position_missing,
-                       "message": "持仓在信号日缺少行情,无法生成计划"},
-            )
-            self._record_position_missing_issues(run_id, signal_date_s, position_missing)
-            self._supersede_priors(run_id, prior_for_account)
-            raise PlanBlockedError(
-                f"持仓行情缺失: {', '.join(position_missing)} (signal_date={signal_date_s})",
-                details={"missing": position_missing,
-                         "run_id": run_id, "run_key": run_key},
-            )
-        if health["overall_status"] == "BLOCKED":
-            self.repo.update_plan_run_status(
-                run_id, _STATUS_BLOCKED,
-                error={"code": "DATA_GATE_BLOCKED",
-                       "health": _slim_health(health)},
-            )
-            self._record_health_issues(run_id, signal_date_s, health)
-            self._supersede_priors(run_id, prior_for_account)
-            raise PlanBlockedError(
-                f"数据门禁阻断: {health['overall_status']}",
-                details={"health": _slim_health(health),
-                         "run_id": run_id, "run_key": run_key},
-            )
-        if health["overall_status"] == "PARTIAL":
-            warnings.append(f"数据部分缺失(PARTIAL): 池缺失比例 "
-                            f"{health['pool_missing_ratio']:.2%}")
-
-        # ---- 步骤 3-9: GENERATING ----
-        self.repo.update_plan_run_status(run_id, _STATUS_GENERATING)
         try:
-            status, items = self._generate_items(
-                run_id=run_id, account=account, signal_date_d=signal_date_d,
-                pool=pool, benchmark_bars=benchmark_bars,
-                min_score=min_score, base_risk=base_risk, max_risk=max_risk,
-                warnings=warnings,
+            # ---- 步骤 2: VALIDATING —— 数据质量门禁 ----
+            self._renew_generation_lease(run_id, owner_id, guard)
+            self._transition_or_raise(
+                run_id,
+                _STATUS_VALIDATING,
+                expected_statuses=(_STATUS_CREATED,),
+                owner_id=owner_id,
+                guard=guard,
             )
-        except Exception as exc:  # 引擎异常 → FAILED
-            logger.exception("PlanService 生成失败 run_id=%s", run_id)
-            self.repo.update_plan_run_status(
-                run_id, _STATUS_FAILED,
-                error={"code": "ENGINE_ERROR",
-                       "message": str(exc), "type": type(exc).__name__},
+            pool_name = pool["pool_name"]
+            health = self.market_data_service.check_data_health(
+                trade_date=signal_date_d, pool_name=pool_name,
+                benchmark_codes=self.benchmark_codes,
             )
-            self._supersede_priors(run_id, prior_for_account)
-            raise
+            self._renew_generation_lease(run_id, owner_id, guard)
+            # 持仓行情缺失检查(spec 场景 B):任一持仓缺 signal_date 行情 → BLOCKED。
+            position_missing = self._positions_missing_on(account_id, signal_date_d)
+            if position_missing:
+                blocked_error = PlanBlockedError(
+                    f"持仓行情缺失: {', '.join(position_missing)} "
+                    f"(signal_date={signal_date_s})",
+                    details={
+                        "missing": position_missing,
+                        "run_id": run_id,
+                        "run_key": run_key,
+                    },
+                )
+                self._transition_or_raise(
+                    run_id,
+                    _STATUS_BLOCKED,
+                    expected_statuses=(_STATUS_VALIDATING,),
+                    owner_id=owner_id,
+                    guard=guard,
+                    error=_trading_error_payload(blocked_error),
+                )
+                self._record_position_missing_issues(
+                    run_id, signal_date_s, position_missing
+                )
+                raise blocked_error
+            if health["overall_status"] == "BLOCKED":
+                blocked_error = PlanBlockedError(
+                    f"数据门禁阻断: {health['overall_status']}",
+                    details={
+                        "health": _slim_health(health),
+                        "run_id": run_id,
+                        "run_key": run_key,
+                    },
+                )
+                self._transition_or_raise(
+                    run_id,
+                    _STATUS_BLOCKED,
+                    expected_statuses=(_STATUS_VALIDATING,),
+                    owner_id=owner_id,
+                    guard=guard,
+                    error=_trading_error_payload(blocked_error),
+                )
+                self._record_health_issues(run_id, signal_date_s, health)
+                raise blocked_error
+            if health["overall_status"] == "PARTIAL":
+                warnings.append(f"数据部分缺失(PARTIAL): 池缺失比例 "
+                                f"{health['pool_missing_ratio']:.2%}")
 
-        # ---- 步骤 10: 持久化 items + 终态 ----
-        for rank, item in enumerate(items, start=1):
-            self.repo.create_plan_item(plan_run_id=run_id, **item)
-        self.repo.update_plan_run_status(
-            run_id, status,
-            market_regime=self._last_regime,
-            market_score=self._last_score,
-            recommended_exposure=self._last_exposure,
-        )
+            # ---- 步骤 3-9: GENERATING ----
+            self._renew_generation_lease(run_id, owner_id, guard)
+            self._transition_or_raise(
+                run_id,
+                _STATUS_GENERATING,
+                expected_statuses=(_STATUS_VALIDATING,),
+                owner_id=owner_id,
+                guard=guard,
+            )
+            try:
+                generation = self._generate_items(
+                    run_id=run_id, account=account, signal_date_d=signal_date_d,
+                    pool=pool, benchmark_bars=benchmark_bars,
+                    min_score=min_score, base_risk=base_risk, max_risk=max_risk,
+                    warnings=warnings,
+                )
+            except Exception as exc:  # 引擎异常 → FAILED
+                self._renew_generation_lease(run_id, owner_id, guard)
+                logger.exception("PlanService 生成失败 run_id=%s", run_id)
+                failed_error = PlanGenerationFailedError(
+                    f"计划生成失败: {exc}",
+                    details={
+                        "run_id": run_id,
+                        "run_key": run_key,
+                        "cause": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    },
+                )
+                self._transition_or_raise(
+                    run_id,
+                    _STATUS_FAILED,
+                    expected_statuses=(_STATUS_GENERATING,),
+                    owner_id=owner_id,
+                    guard=guard,
+                    error=_trading_error_payload(failed_error),
+                )
+                raise failed_error from exc
 
-        # 旧计划 SUPERSEDE(仅在本次成功生成时)
-        self._supersede_priors(run_id, prior_for_account)
-
-        return {
-            "id": run_id, "run_key": run_key, "status": status,
-            "signal_date": signal_date_s,
-            "target_trade_date": target_trade_date.isoformat(),
-            "reused": False, "warnings": warnings,
-        }
+            # ---- 步骤 10: 原子持久化 items + 终态 + peer fencing ----
+            self._renew_generation_lease(run_id, owner_id, guard)
+            final = self.repo.finalize_plan_run(
+                run_id,
+                status=generation.status,
+                items=generation.items,
+                market_regime=generation.market_regime,
+                market_score=generation.market_score,
+                recommended_exposure=generation.recommended_exposure,
+                warnings=list(generation.warnings),
+                degraded=generation.degraded,
+                generation_owner_id=owner_id,
+                now=self._generation_now(),
+            )
+            if final["status"] != generation.status:
+                self._raise_lost_generation(run_id)
+            return {
+                "id": run_id, "run_key": run_key, "status": generation.status,
+                "signal_date": signal_date_s,
+                "target_trade_date": target_trade_date.isoformat(),
+                "reused": False, "warnings": list(generation.warnings),
+            }
+        finally:
+            stop_heartbeat.set()
+            heartbeat.join()
+            self.repo.release_plan_generation_lease(run_id, owner_id=owner_id)
 
     def get_plan_detail(self, run_id: int) -> dict:
         """返回计划 + 全部明细(spec §11.4 形状)。"""
@@ -268,13 +543,115 @@ class PlanService:
             "target_trade_date": run["target_trade_date"],
             "market_regime": run.get("market_regime"),
             "market_score": run.get("market_score"),
-            "degraded": run.get("account_snapshot", {}).get("degraded", False),
+            "degraded": run["degraded"],
             "recommended_exposure": run.get("recommended_exposure"),
-            "warnings": run.get("warnings", []),
+            "warnings": run["warnings"],
             "items": items,
             "created_at": run.get("created_at"),
             "published_at": run.get("published_at"),
         }
+
+    def _resolve_existing_run(
+        self, run: dict, *, signal_date_d: date, pool_name: str
+    ) -> dict:
+        """Apply the persisted-state reuse matrix without mutating the run."""
+        status = run["status"]
+        if status in _REUSEABLE_STATUSES:
+            reuse_health = self.market_data_service.check_data_health(
+                trade_date=signal_date_d,
+                pool_name=pool_name,
+                benchmark_codes=self.benchmark_codes,
+            )
+            if reuse_health["overall_status"] == "BLOCKED":
+                raise PlanBlockedError(
+                    f"数据门禁阻断: {reuse_health['overall_status']}",
+                    details={
+                        "health": _slim_health(reuse_health),
+                        "run_id": run["id"],
+                        "run_key": run["run_key"],
+                    },
+                )
+            return _reused_plan_result(run)
+        if status in _IN_PROGRESS_STATUSES:
+            return _reused_plan_result(run)
+        if status == _STATUS_BLOCKED:
+            self._raise_persisted_error(run, PlanBlockedError)
+        if status == _STATUS_FAILED:
+            self._raise_persisted_error(run, PlanGenerationFailedError)
+        if status == _STATUS_SUPERSEDED:
+            successor = self._resolve_recovery_successor(run)
+            if successor is not None:
+                return self._resolve_existing_run(
+                    successor,
+                    signal_date_d=signal_date_d,
+                    pool_name=pool_name,
+                )
+            raise PlanSupersededError(
+                f"计划 {run['id']} 已被后续版本替代",
+                details={
+                    "run_id": run["id"],
+                    "run_key": run["run_key"],
+                    "status": status,
+                },
+            )
+        raise PlanGenerationFailedError(
+            f"计划 {run['id']} 处于未知状态 {status}",
+            details={
+                "run_id": run["id"],
+                "run_key": run["run_key"],
+                "status": status,
+            },
+        )
+
+    def _resolve_recovery_successor(self, run: dict) -> dict | None:
+        """Follow only a verified chain made by stale generation recovery."""
+        current = run
+        visited: set[int] = set()
+        while current.get("status") == _STATUS_SUPERSEDED:
+            current_id = current.get("id")
+            if not isinstance(current_id, int) or current_id in visited:
+                return None
+            visited.add(current_id)
+
+            marker = current.get("error")
+            details = marker.get("details") if isinstance(marker, dict) else None
+            successor_id = (
+                details.get("successor_run_id")
+                if isinstance(details, dict)
+                else None
+            )
+            if (
+                not isinstance(marker, dict)
+                or not isinstance(details, dict)
+                or marker.get("code") != "PLAN_GENERATION_RECOVERED"
+                or details.get("reason") != "GENERATION_LEASE_EXPIRED"
+                or details.get("original_run_key") != current.get("run_key")
+                or not isinstance(successor_id, int)
+                or isinstance(successor_id, bool)
+                or successor_id != current.get("superseded_by_id")
+                or successor_id in visited
+            ):
+                return None
+            current = self.repo.get_plan_run(successor_id)
+            if current is None:
+                return None
+        return current
+
+    @staticmethod
+    def _raise_persisted_error(run: dict, error_type) -> None:
+        error = run.get("error") or {}
+        details = error.get("details")
+        if not isinstance(details, dict):
+            details = {
+                key: value
+                for key, value in error.items()
+                if key not in ("code", "message")
+            }
+            details.update({"run_id": run["id"], "run_key": run["run_key"]})
+        message = error.get("message") or (
+            f"计划 {run['id']} 持久状态为 {run['status']}"
+        )
+        raise error_type(message, details=details)
 
     def publish_plan(self, run_id: int) -> dict:
         """READY/PARTIAL → PUBLISHED(spec §9.2)。已发布或非就绪报错。"""
@@ -291,7 +668,29 @@ class PlanService:
                 f"计划 {run_id} 状态为 {run['status']},不可发布(仅 READY/PARTIAL 可发布)",
                 details={"run_id": run_id, "status": run["status"]},
             )
-        self.repo.publish_plan_run(run_id)
+        if not self.repo.publish_plan_run(run_id):
+            current = self.repo.get_plan_run(run_id)
+            if current is not None and current["status"] == _STATUS_SUPERSEDED:
+                raise PlanSupersededError(
+                    f"计划 {run_id} 已被后续版本替代",
+                    details={
+                        "run_id": run_id,
+                        "run_key": current["run_key"],
+                        "status": current["status"],
+                    },
+                )
+            if current is not None and current["status"] == _STATUS_PUBLISHED:
+                raise PlanAlreadyPublishedError(
+                    f"计划 {run_id} 已发布,不可重复发布",
+                    details={"run_id": run_id},
+                )
+            raise PlanBlockedError(
+                f"计划 {run_id} 状态已变化,不可发布",
+                details={
+                    "run_id": run_id,
+                    "status": current["status"] if current else None,
+                },
+            )
         updated = self.repo.get_plan_run(run_id)
         return {
             "id": run_id, "status": _STATUS_PUBLISHED,
@@ -335,8 +734,8 @@ class PlanService:
 
     def _generate_items(self, *, run_id, account, signal_date_d, pool,
                         benchmark_bars, min_score, base_risk, max_risk,
-                        warnings) -> tuple[str, list[dict]]:
-        """步骤 3-9。返回 (最终状态, items)。
+                        warnings) -> _PlanGenerationResult:
+        """步骤 3-9。返回本次调用不可变的计划与质量结果。
 
         items 按 [持仓项..., 候选项...] 顺序(spec §8.1 先处理持仓)。
         最终状态:READY 或 PARTIAL(有非阻断 warning 时)。
@@ -344,18 +743,30 @@ class PlanService:
         items: list[dict] = []
 
         # ---- 步骤 3: 市场状态(spec §8.4)----
-        # Phase 3 简化:breadth_ratio=None(降级,全市场宽度需 Phase 4+ 接入)。
-        regime_result = compute_market_score(
-            benchmark_bars=benchmark_bars,
-            breadth_ratio=None,
-            volatility_percentile=_DEFAULT_VOLATILITY_PERCENTILE,
-        )
-        # 缓存供 step 10 写入 plan_run
-        self._last_regime = regime_result.regime
-        self._last_score = regime_result.score
-        self._last_exposure = regime_result.recommended_exposure
-        if regime_result.degraded:
-            warnings.append("市场宽度数据不可用,降级模式(degraded=True,新开仓风险减半)")
+        # 显式空基准不是默认配置：保留股票池门禁，但以中性降级状态
+        # 约束新开仓风险，避免索引空列表或伪造基准分数。
+        if benchmark_bars:
+            # Phase 3 简化:breadth_ratio=None(降级,全市场宽度需 Phase 4+ 接入)。
+            regime_result = compute_market_score(
+                benchmark_bars=benchmark_bars,
+                breadth_ratio=None,
+                volatility_percentile=_DEFAULT_VOLATILITY_PERCENTILE,
+            )
+            if regime_result.degraded:
+                warnings.append(
+                    "市场宽度数据不可用,降级模式(degraded=True,新开仓风险减半)"
+                )
+        else:
+            regime_result = MarketRegimeResult(
+                score=0,
+                regime="NEUTRAL",
+                degraded=True,
+                recommended_exposure=0.40,
+                m_signals={"BENCHMARK_UNCONFIGURED": 0},
+            )
+            warnings.append(
+                "未配置市场基准,使用 NEUTRAL 降级状态(degraded=True,新开仓风险减半)"
+            )
 
         # 组合净值快照(此时持仓行情已校验存在,不会抛错)
         try:
@@ -402,7 +813,15 @@ class PlanService:
         # ---- 状态判定 ----
         # 有任何非阻断 warning → PARTIAL;否则 READY。
         status = _STATUS_PARTIAL if warnings else _STATUS_READY
-        return status, items
+        return _PlanGenerationResult(
+            status=status,
+            items=tuple(items),
+            market_regime=regime_result.regime,
+            market_score=regime_result.score,
+            recommended_exposure=regime_result.recommended_exposure,
+            degraded=regime_result.degraded,
+            warnings=tuple(warnings),
+        )
 
     # ---------- 持仓评估(步骤 4)----------
 
@@ -823,11 +1242,6 @@ class PlanService:
                 source="market_data_service", details=issue.get("details"),
                 run_id=run_id,
             )
-
-    def _supersede_priors(self, new_run_id: int, prior_runs: list[dict]) -> None:
-        for r in prior_runs:
-            self.repo.supersede_plan_run(r["id"], new_run_id)
-
 
 # ===================================================================
 # 模块级辅助函数(纯函数,便于单测)

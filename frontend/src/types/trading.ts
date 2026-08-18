@@ -246,6 +246,21 @@ export interface PlanRunDetail {
   published_at: string | null
 }
 
+export interface PlanRunSummary {
+  id: number
+  account_id: number
+  status: string
+  signal_date: string
+  target_trade_date: string
+  market_regime: string | null
+  market_score: number | null
+  recommended_exposure: number | null
+  warnings: string[]
+  error: Record<string, unknown> | null
+  created_at: string
+  published_at: string | null
+}
+
 export interface PlanPublishResponse {
   id: number
   status: string

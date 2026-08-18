@@ -1,6 +1,7 @@
 import os
 from datetime import date
 import pytest
+from backend.trading.errors import TradingError
 from backend.trading.services.execution_service import ExecutionService
 from backend.trading.repository import TradingRepository
 from backend.trading.migrations import run_migrations
@@ -105,6 +106,70 @@ def test_idempotent_on_client_execution_id(setup):
     assert r2["execution"]["reused"] is True
     # 现金只扣一次
     assert repo.get_account(acc["id"])["cash_balance"] == 100000 - 10000
+
+
+@pytest.mark.parametrize(
+    ("field", "different_value"),
+    [
+        ("account_id", "other-account"),
+        ("stock_code", "600000.SH"),
+        ("side", "SELL"),
+        ("trade_date", "2026-07-23"),
+        ("price", 10.5),
+        ("quantity", 1100),
+        ("commission", 6.0),
+        ("tax", 2.0),
+        ("note", "changed"),
+        ("plan_item_id", 999),
+    ],
+)
+def test_client_execution_id_conflict_rejects_changed_payload_without_writes(
+    setup, field, different_value
+):
+    repo, acc = setup
+    other = repo.create_account(
+        name="secondary",
+        initial_equity=50_000,
+        cash_balance=50_000,
+        is_active=False,
+    )
+    svc = ExecutionService(repo)
+    original = {
+        "account_id": acc["id"],
+        "stock_code": "000001.SZ",
+        "side": "BUY",
+        "trade_date": "2026-07-22",
+        "price": 10.0,
+        "quantity": 1000,
+        "commission": 5.0,
+        "tax": 1.0,
+        "note": "original",
+        "plan_item_id": None,
+        "client_execution_id": "payload-bound",
+    }
+    svc.record_execution(**original)
+    before = {
+        "account": repo.get_account(acc["id"]),
+        "other": repo.get_account(other["id"]),
+        "position": repo.get_position(acc["id"], "000001.SZ"),
+        "executions": repo.list_executions(acc["id"]),
+        "audits": repo.list_audit_logs(action="EXECUTION_BUY"),
+    }
+    replay = dict(original)
+    replay[field] = (
+        other["id"] if different_value == "other-account" else different_value
+    )
+
+    with pytest.raises(TradingError) as exc_info:
+        svc.record_execution(**replay)
+
+    assert exc_info.value.code == "EXECUTION_IDEMPOTENCY_CONFLICT"
+    assert field in exc_info.value.details["conflicting_fields"]
+    assert repo.get_account(acc["id"]) == before["account"]
+    assert repo.get_account(other["id"]) == before["other"]
+    assert repo.get_position(acc["id"], "000001.SZ") == before["position"]
+    assert repo.list_executions(acc["id"]) == before["executions"]
+    assert repo.list_audit_logs(action="EXECUTION_BUY") == before["audits"]
 
 
 def test_sell_exceeds_available_raises(setup):

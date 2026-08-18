@@ -12,6 +12,10 @@ from httpx import AsyncClient, ASGITransport
 
 from backend.main import app
 from backend.trading.domain import DailyBar
+from backend.trading.errors import (
+    PlanGenerationFailedError,
+    PlanSupersededError,
+)
 from backend.trading.migrations import run_migrations
 from backend.trading.repository import TradingRepository
 from backend.trading.services.account_service import AccountService
@@ -25,7 +29,8 @@ from backend.trading.services.strategy_service import StrategyService
 TEST_DB = "data/test_api_phase3.db"
 SIGNAL_DATE = date(2026, 7, 22)        # 周三
 TARGET_TRADE_DATE = date(2026, 7, 23)  # 周四
-BENCHMARK = "000300.SH"
+BENCHMARKS = ["000300.SH", "000905.SH"]
+BENCHMARK = BENCHMARKS[0]
 
 
 # ===================================================================
@@ -52,7 +57,8 @@ def _gen_bars(code, end_date, n, start_price, slope=0.004,
 
 
 def _add_benchmark(repo, end_date=SIGNAL_DATE, n=70, start=3000.0):
-    repo.upsert_daily_bars(_gen_bars(BENCHMARK, end_date, n, start, slope=0.003))
+    for code in BENCHMARKS:
+        repo.upsert_daily_bars(_gen_bars(code, end_date, n, start, slope=0.003))
 
 
 def _add_pool_stock(repo, code, end_date=SIGNAL_DATE, n=65, start=10.0):
@@ -99,9 +105,11 @@ def setup_phase3(monkeypatch):
     monkeypatch.setattr(router_mod, "execution_service", ExecutionService(repo))
     monkeypatch.setattr(router_mod, "portfolio_service", PortfolioService(repo))
     monkeypatch.setattr(router_mod, "strategy_service", StrategyService(repo))
-    monkeypatch.setattr(router_mod, "plan_service",
-                        PlanService(repo, MarketDataService(repo, provider=None),
-                                    PortfolioService(repo)))
+    plan_service = PlanService(
+        repo, MarketDataService(repo, provider=None), PortfolioService(repo),
+        benchmark_codes=BENCHMARKS,
+    )
+    monkeypatch.setattr(router_mod, "plan_service", plan_service)
     yield
     import gc; gc.collect()
     if os.path.exists(TEST_DB):
@@ -299,6 +307,94 @@ async def test_create_plan_run_idempotent(seeded_setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["CREATED", "VALIDATING", "GENERATING"])
+async def test_create_plan_run_reused_in_progress_returns_202(
+    seeded_setup, monkeypatch, status
+):
+    import backend.trading.router as router_mod
+
+    class InProgressPlanService:
+        def generate_plan(self, **_kwargs):
+            return {
+                "id": 77,
+                "run_key": "in-progress-key",
+                "status": status,
+                "signal_date": SIGNAL_DATE.isoformat(),
+                "target_trade_date": TARGET_TRADE_DATE.isoformat(),
+                "reused": True,
+            }
+
+    monkeypatch.setattr(router_mod, "plan_service", InProgressPlanService())
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/api/trading/plan-runs", json={
+            "account_id": seeded_setup["account_id"],
+            "signal_date": SIGNAL_DATE.isoformat(),
+            "stock_pool_version_id": seeded_setup["pool_version_id"],
+            "strategy_version_id": seeded_setup["strategy_version_id"],
+        })
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "id": 77,
+        "run_key": "in-progress-key",
+        "status": status,
+        "signal_date": SIGNAL_DATE.isoformat(),
+        "target_trade_date": TARGET_TRADE_DATE.isoformat(),
+        "reused": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status_code", "code"),
+    [
+        (
+            PlanGenerationFailedError(
+                "persisted failure", details={"run_id": 71}
+            ),
+            500,
+            "PLAN_GENERATION_FAILED",
+        ),
+        (
+            PlanSupersededError(
+                "persisted superseded", details={"run_id": 72}
+            ),
+            409,
+            "PLAN_SUPERSEDED",
+        ),
+    ],
+)
+async def test_create_plan_run_terminal_errors_are_structured(
+    seeded_setup, monkeypatch, error, status_code, code
+):
+    import backend.trading.router as router_mod
+
+    class ErrorPlanService:
+        def generate_plan(self, **_kwargs):
+            raise error
+
+    monkeypatch.setattr(router_mod, "plan_service", ErrorPlanService())
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/api/trading/plan-runs", json={
+            "account_id": seeded_setup["account_id"],
+            "signal_date": SIGNAL_DATE.isoformat(),
+            "stock_pool_version_id": seeded_setup["pool_version_id"],
+            "strategy_version_id": seeded_setup["strategy_version_id"],
+        })
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == {
+        "code": code,
+        "message": error.message,
+        "details": error.details,
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_plan_runs(seeded_setup):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         await ac.post("/api/trading/plan-runs", json={
@@ -321,6 +417,65 @@ async def test_list_plan_runs(seeded_setup):
 
 
 @pytest.mark.asyncio
+async def test_list_plan_runs_filters_two_accounts_and_returns_account_id(
+    seeded_setup,
+):
+    import backend.trading.router as router_mod
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        created = await client.post(
+            "/api/trading/plan-runs",
+            json={
+                "account_id": seeded_setup["account_id"],
+                "signal_date": SIGNAL_DATE.isoformat(),
+                "stock_pool_version_id": seeded_setup["pool_version_id"],
+                "strategy_version_id": seeded_setup["strategy_version_id"],
+            },
+        )
+        other_account = router_mod.trading_repo.create_account(
+            name="secondary",
+            initial_equity=50_000,
+            cash_balance=50_000,
+            is_active=False,
+        )
+        other_run = router_mod.trading_repo.create_plan_run(
+            run_key="api-other-account",
+            account_id=other_account["id"],
+            signal_date=SIGNAL_DATE.isoformat(),
+            target_trade_date=TARGET_TRADE_DATE.isoformat(),
+            stock_pool_version_id=seeded_setup["pool_version_id"],
+            strategy_version_id=seeded_setup["strategy_version_id"],
+            status="READY",
+            account_snapshot_json={"cash_balance": 50_000},
+            data_snapshot_hash="api-other-snapshot",
+        )
+
+        first_response = await client.get(
+            "/api/trading/plan-runs",
+            params={"account_id": seeded_setup["account_id"]},
+        )
+        other_response = await client.get(
+            "/api/trading/plan-runs",
+            params={"account_id": other_account["id"]},
+        )
+
+    assert created.status_code == 200
+    assert first_response.status_code == 200
+    assert len(first_response.json()["plan_runs"]) == 1
+    assert first_response.json()["plan_runs"][0]["id"] == created.json()["id"]
+    assert (
+        first_response.json()["plan_runs"][0]["account_id"]
+        == seeded_setup["account_id"]
+    )
+    assert [row["id"] for row in other_response.json()["plan_runs"]] == [
+        other_run["id"]
+    ]
+    assert other_response.json()["plan_runs"][0]["account_id"] == other_account["id"]
+
+
+@pytest.mark.asyncio
 async def test_get_plan_detail(seeded_setup):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r_run = await ac.post("/api/trading/plan-runs", json={
@@ -338,6 +493,8 @@ async def test_get_plan_detail(seeded_setup):
                 "warnings", "items", "created_at"):
         assert key in data, f"missing key {key}"
     assert data["market_regime"] == "ATTACK"
+    assert data["degraded"] is True
+    assert "市场宽度数据不可用" in data["warnings"][0]
     assert isinstance(data["items"], list)
     assert len(data["items"]) >= 1
     # items 形状: rule_hits/rule_misses 为 list(spec §11.4)
@@ -345,6 +502,91 @@ async def test_get_plan_detail(seeded_setup):
     assert "rule_hits" in it
     assert "rule_misses" in it
     assert isinstance(it["rule_hits"], list)
+
+
+@pytest.mark.asyncio
+async def test_health_and_plan_block_when_configured_benchmark_missing(seeded_setup):
+    """基准在复用前变为缺失时,数据健康与计划生成必须同时 BLOCKED。"""
+    import backend.trading.router as router_mod
+
+    body = {
+        "account_id": seeded_setup["account_id"],
+        "signal_date": SIGNAL_DATE.isoformat(),
+        "stock_pool_version_id": seeded_setup["pool_version_id"],
+        "strategy_version_id": seeded_setup["strategy_version_id"],
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        initial_plan = await ac.post("/api/trading/plan-runs", json=body)
+    assert initial_plan.status_code == 200
+
+    conn = router_mod.trading_repo._conn()
+    try:
+        conn.execute(
+            "DELETE FROM trade_daily_bars WHERE stock_code = ?",
+            ("000905.SH",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        health = await ac.get(
+            f"/api/trading/data-health?trade_date={SIGNAL_DATE.isoformat()}"
+        )
+        plan = await ac.post("/api/trading/plan-runs", json=body)
+
+    assert health.status_code == 200
+    health_data = health.json()
+    assert health_data["benchmark_codes"] == BENCHMARKS
+    assert health_data["benchmark_updated"]["000905.SH"] is False
+    assert health_data["overall_status"] == "BLOCKED"
+    assert plan.status_code == 409
+    assert (
+        plan.json()["detail"]["details"]["health"]["benchmark_updated"]
+        == health_data["benchmark_updated"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_plan_blocks_when_configured_benchmark_missing(seeded_setup):
+    """首次计划请求前缺 000905.SH 时,health 与 fresh plan 同时 BLOCKED。"""
+    import backend.trading.router as router_mod
+
+    conn = router_mod.trading_repo._conn()
+    try:
+        conn.execute(
+            "DELETE FROM trade_daily_bars WHERE stock_code = ?",
+            ("000905.SH",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    body = {
+        "account_id": seeded_setup["account_id"],
+        "signal_date": SIGNAL_DATE.isoformat(),
+        "stock_pool_version_id": seeded_setup["pool_version_id"],
+        "strategy_version_id": seeded_setup["strategy_version_id"],
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        health = await ac.get(
+            f"/api/trading/data-health?trade_date={SIGNAL_DATE.isoformat()}"
+        )
+        plan = await ac.post("/api/trading/plan-runs", json=body)
+        replayed_plan = await ac.post("/api/trading/plan-runs", json=body)
+
+    assert health.status_code == 200
+    health_data = health.json()
+    assert health_data["benchmark_codes"] == BENCHMARKS
+    assert health_data["benchmark_updated"]["000905.SH"] is False
+    assert health_data["overall_status"] == "BLOCKED"
+    assert plan.status_code == 409
+    assert replayed_plan.status_code == 409
+    assert replayed_plan.json() == plan.json()
+    assert (
+        plan.json()["detail"]["details"]["health"]["benchmark_updated"]
+        == health_data["benchmark_updated"]
+    )
 
 
 @pytest.mark.asyncio

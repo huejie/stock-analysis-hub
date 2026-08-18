@@ -10,6 +10,7 @@ Phase 1 只创建 trade_* 表(全部用 CREATE TABLE IF NOT EXISTS),后续新增
 """
 import sqlite3
 import logging
+import time
 from pathlib import Path
 
 logger = logging.getLogger("trading.migrations")
@@ -17,9 +18,17 @@ logger = logging.getLogger("trading.migrations")
 
 def _set_pragmas(conn: sqlite3.Connection) -> None:
     """开启 WAL、外键、busy_timeout(文档 10.1)。"""
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    conn.execute("PRAGMA foreign_keys=ON")
 
 
 # 每个迁移是一个 (version, name, sql_statements) 元组
@@ -44,6 +53,16 @@ MIGRATION_VERSIONS: list[dict] = [
         "version": 4,
         "name": "phase5_backtest_tables",
         "description": "Phase 5 回测表(backtest_runs + backtest_trades)",
+    },
+    {
+        "version": 5,
+        "name": "runtime_trade_calendar",
+        "description": "持久化交易日历",
+    },
+    {
+        "version": 6,
+        "name": "runtime_correctness_columns",
+        "description": "计划降级状态和股池可用性标记",
     },
 ]
 
@@ -318,12 +337,30 @@ _MIGRATION_4_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_trade_backtest_trades_run ON trade_backtest_trades(backtest_run_id)",
 ]
 
+_MIGRATION_5_SQL = ["""CREATE TABLE IF NOT EXISTS trade_calendar (
+    trade_date TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'SSE',
+    is_open INTEGER NOT NULL CHECK (is_open IN (0, 1)),
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (trade_date, exchange)
+)"""]
+
+_MIGRATION_6_SQL = [
+    "ALTER TABLE trade_plan_runs ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE trade_stock_pool_versions ADD COLUMN is_usable INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE trade_stock_pool_versions ADD COLUMN invalid_reason TEXT",
+]
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    _set_pragmas(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        _set_pragmas(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def run_migrations(db_path: str) -> None:
@@ -336,6 +373,7 @@ def run_migrations(db_path: str) -> None:
     # 必须显式 close(),否则 Windows 上文件锁会阻止外部删除。
     conn = _connect(db_path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
         # 确保 trade_migrations 表存在(首次迁移用它记录自己)
         conn.execute(_MIGRATION_1_SQL[0])
         applied = {
@@ -343,45 +381,29 @@ def run_migrations(db_path: str) -> None:
                 "SELECT version FROM trade_migrations"
             ).fetchall()
         }
+        migration_sql = {
+            1: _MIGRATION_1_SQL[1:],
+            2: _MIGRATION_2_SQL,
+            3: _MIGRATION_3_SQL,
+            4: _MIGRATION_4_SQL,
+            5: _MIGRATION_5_SQL,
+            6: _MIGRATION_6_SQL,
+        }
 
-        if 1 not in applied:
-            for stmt in _MIGRATION_1_SQL[1:]:
+        for migration in MIGRATION_VERSIONS:
+            version = migration["version"]
+            if version in applied:
+                continue
+            for stmt in migration_sql[version]:
                 conn.execute(stmt)
             conn.execute(
                 "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
-                (1, "initial_trade_tables"),
+                (version, migration["name"]),
             )
-            conn.commit()
-            logger.info("trading migration v1 applied")
-
-        if 2 not in applied:
-            for stmt in _MIGRATION_2_SQL:
-                conn.execute(stmt)
-            conn.execute(
-                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
-                (2, "phase2_account_tables"),
-            )
-            conn.commit()
-            logger.info("trading migration v2 applied")
-
-        if 3 not in applied:
-            for stmt in _MIGRATION_3_SQL:
-                conn.execute(stmt)
-            conn.execute(
-                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
-                (3, "phase3_plan_indexes"),
-            )
-            conn.commit()
-            logger.info("trading migration v3 applied")
-
-        if 4 not in applied:
-            for stmt in _MIGRATION_4_SQL:
-                conn.execute(stmt)
-            conn.execute(
-                "INSERT INTO trade_migrations (version, name) VALUES (?, ?)",
-                (4, "phase5_backtest_tables"),
-            )
-            conn.commit()
-            logger.info("trading migration v4 applied")
+            logger.info("trading migration v%s applied", version)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
