@@ -101,7 +101,10 @@ def fetch_stock_data(date_str: str) -> list[dict]:
     quotes = fetch_quotes(codes, date_str)
 
     # 批量获取板块标签
-    from lhb_crawler import fetch_concept_tags
+    try:
+        from backend.lhb_crawler import fetch_concept_tags
+    except ImportError:
+        from .lhb_crawler import fetch_concept_tags
     sector_cache: dict[str, list[str]] = {}
     for code in codes:
         sector_cache[code] = fetch_concept_tags(code)
